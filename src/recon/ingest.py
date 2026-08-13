@@ -23,6 +23,10 @@ from .models import CATALOGUE_INDEX, ReconciliationCase
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%b-%Y", "%d/%m/%y")
 SKU_PATTERN = re.compile(r"^0?([A-Z]{3})[\s-]?(\d{4})$")
 
+# How far after a count a docket can land and still describe stock that was
+# physically on the shelf when that count happened.
+LATE_DOCKET_WINDOW = timedelta(days=3)
+
 
 @dataclass
 class Rejection:
@@ -32,10 +36,28 @@ class Rejection:
 
 
 @dataclass
+class CaseEvidence:
+    """The rows behind one case, kept so downstream layers can inspect the
+    *shape* of a discrepancy and not just its size.
+
+    `late_deliveries` holds dockets dated after this period's count — those
+    rows belong to the next period by the attribution rule, but they are the
+    evidence that explains a positive discrepancy here. A rules layer that
+    only sees aggregates cannot tell a late invoice from a miscount, because
+    numerically they are identical.
+    """
+
+    sales: list[dict] = field(default_factory=list)
+    deliveries: list[dict] = field(default_factory=list)
+    late_deliveries: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class IngestResult:
     cases: list[ReconciliationCase] = field(default_factory=list)
     rejections: list[Rejection] = field(default_factory=list)
     duplicates_dropped: int = 0
+    evidence: dict[str, CaseEvidence] = field(default_factory=dict)
 
     @property
     def rejection_rate(self) -> float:
@@ -190,20 +212,29 @@ def build_cases(raw_dir: Path) -> IngestResult:
     deliveries = load_deliveries(raw_dir / "deliveries.csv", result)
     counts = load_counts(raw_dir / "stock_counts.csv", result)
 
+    # Bucket by SKU once. Scanning every row per case is O(cases x rows),
+    # and the rules layer walks this same data again for each check.
+    sales_by_sku: dict[str, list[dict]] = {}
+    for p in pos:
+        sales_by_sku.setdefault(p["sku_id"], []).append(p)
+    deliveries_by_sku: dict[str, list[dict]] = {}
+    for d in deliveries:
+        deliveries_by_sku.setdefault(d["sku_id"], []).append(d)
+
     for c in sorted(counts, key=lambda r: (r["sku_id"], r["count_date"])):
         period_end = c["count_date"]
         period_start = period_end - timedelta(days=6)
         sku_id = c["sku_id"]
 
-        sold = sum(
-            p["qty"] for p in pos
-            if p["sku_id"] == sku_id and period_start <= p["sale_date"] <= period_end
-        )
-        delivered = sum(
-            d["qty_received"] for d in deliveries
-            if d["sku_id"] == sku_id
-            and period_start <= d["delivery_date"] <= period_end
-        )
+        evidence = CaseEvidence()
+        for p in sales_by_sku.get(sku_id, ()):
+            if period_start <= p["sale_date"] <= period_end:
+                evidence.sales.append(p)
+        for d in deliveries_by_sku.get(sku_id, ()):
+            if period_start <= d["delivery_date"] <= period_end:
+                evidence.deliveries.append(d)
+            elif period_end < d["delivery_date"] <= period_end + LATE_DOCKET_WINDOW:
+                evidence.late_deliveries.append(d)
 
         result.cases.append(ReconciliationCase(
             case_id=c["count_id"],
@@ -212,9 +243,10 @@ def build_cases(raw_dir: Path) -> IngestResult:
             period_end=period_end,
             opening_count=c["opening_qty"],
             closing_count=c["closing_qty"],
-            delivered_units=delivered,
-            sold_units=sold,
+            delivered_units=sum(d["qty_received"] for d in evidence.deliveries),
+            sold_units=sum(p["qty"] for p in evidence.sales),
         ))
+        result.evidence[c["count_id"]] = evidence
 
     return result
 
