@@ -27,6 +27,14 @@ SEED = 20260814
 PERIOD_WEEKS = 6
 START = date(2026, 6, 1)  # a Monday
 
+# Share of deliveries that get a goods-received note booked against them.
+# Deliberately not 1.0. A GRN is the only document that can prove a short
+# delivery, and in a real store the receiving paperwork is the first thing
+# to get skipped on a busy morning. A generator that files one every time
+# would make short deliveries look fully detectable, and the rules layer
+# would then be measured against a world that does not exist.
+GRN_COVERAGE = 0.7
+
 
 # How often each cause is planted. NONE dominates because most weeks in a
 # real store reconcile cleanly, and an eval set where every case is broken
@@ -100,10 +108,20 @@ def _pick_cause(rng: random.Random) -> Cause:
 
 def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
     rng = random.Random(seed)
+    # Whether a GRN was filed is drawn from its own stream so it stays
+    # independent of what went wrong that week. The shared stream measures
+    # clean today (69.5% over 20 seeds, against a configured 70%), but each
+    # cause consumes a different number of draws before this point, so the
+    # independence is incidental rather than guaranteed — adding a cause
+    # that draws differently could couple coverage to cause without anyone
+    # noticing. Recall on short_delivery is bounded by this rate, which
+    # makes it exactly the wrong quantity to leave resting on coincidence.
+    grn_rng = random.Random(seed ^ 0x9E3779B9)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pos_rows: list[dict] = []
     delivery_rows: list[dict] = []
+    grn_rows: list[dict] = []
     count_rows: list[dict] = []
     labels: list[Label] = []
 
@@ -122,8 +140,6 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
             case_id = f"{sku.sku_id}-W{week + 1:02d}"
             opening = on_hand[sku.sku_id]
 
-            # Baseline trade for the week.
-            sold = rng.randint(15, min(95, max(20, opening - 5)))
             cases_in = rng.randint(1, 5)
             delivered_actual = cases_in * sku.case_size
 
@@ -138,9 +154,9 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
 
             # Values as they will be RECORDED (which is not always reality).
             delivered_recorded = delivered_actual
-            sold_recorded = sold
             delivery_date = p_start + timedelta(days=rng.randint(0, 5))
             defer_delivery = False
+            plant_duplicate = False
 
             if cause is Cause.UNIT_MISMATCH:
                 delivered_recorded = cases_in           # cases logged as eaches
@@ -155,10 +171,11 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                 note = "stock received before count, invoice dated after period end"
 
             elif cause is Cause.DUPLICATE_SCAN:
-                dup = rng.randint(3, 12)
-                sold_recorded = sold + dup              # POS double-counted
-                magnitude = dup
-                note = f"{dup} units scanned twice at POS"
+                # Resolved during POS emission below: a double-scan is a
+                # real second transaction, not an inflated weekly total.
+                # Its size is whichever line the till rang twice, so the
+                # magnitude is not known until that line is chosen.
+                plant_duplicate = True
 
             elif cause is Cause.SHORT_DELIVERY:
                 short = rng.randint(2, max(3, sku.case_size // 2))
@@ -178,13 +195,41 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                 magnitude = -rng.randint(1, 5)
                 note = "unexplained loss on a high-value line"
 
+            # Sales are drawn last, against what will actually be on the
+            # shelf once the planted fault has taken its bite. Drawing them
+            # first lets a week sell more units than ever existed; the old
+            # code then clamped the close at zero, which quietly turned a
+            # clean week into a one-unit discrepancy and made a case
+            # labelled `none` look broken to every layer downstream.
+            # Only faults that remove physical stock reduce what can be
+            # sold. A short delivery already shrank delivered_actual, and a
+            # late carryover is a paperwork effect that never touched the
+            # shelf — counting either here would deduct it twice.
+            shrink = magnitude if cause in {
+                Cause.MISCOUNT, Cause.UNLOGGED_WASTAGE, Cause.SHRINKAGE
+            } and magnitude < 0 else 0
+            available = opening + delivered_actual + shrink
+            ceiling = max(0, min(95, available))
+            sold = rng.randint(min(15, ceiling), ceiling)
+            sold_recorded = sold
+
             closing = opening + delivered_actual - sold
             if cause in {Cause.MISCOUNT, Cause.UNLOGGED_WASTAGE, Cause.SHRINKAGE}:
                 closing += magnitude
-            closing = max(closing, 0)
+            if closing < 0:
+                # Guard, not a clamp. A negative close means the planted
+                # arithmetic contradicts itself, and silently flooring it
+                # would push a discrepancy into a case whose label says
+                # there is none — corrupting the evaluation set rather
+                # than the run that produced it.
+                raise AssertionError(
+                    f"{case_id}: negative close ({closing}) from opening={opening}, "
+                    f"delivered={delivered_actual}, sold={sold}, cause={cause.value}"
+                )
 
             # --- emit POS rows -------------------------------------------------
             remaining = sold_recorded
+            emitted: list[tuple[dict, int]] = []
             while remaining > 0:
                 qty = min(remaining, rng.randint(3, 14))
                 remaining -= qty
@@ -198,8 +243,25 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                     "till": rng.choice(["1", "2", "3", ""]),
                 }
                 pos_rows.append(row)
+                emitted.append((row, qty))
                 if rng.random() < 0.015:          # bad export duplicates a row
                     pos_rows.append(dict(row))
+
+            if plant_duplicate and emitted:
+                # A genuine double-scan: the operator rings the same line
+                # twice, so the till writes a *separate* transaction that
+                # agrees on SKU, date and quantity. That pair is the only
+                # honest signature. Note the contrast with the bad-export
+                # duplicate above, which reuses the transaction id and is
+                # noise the ingest layer is right to drop.
+                twin, qty = emitted[rng.randrange(len(emitted))]
+                rescan = dict(twin)
+                rescan["transaction_id"] = f"T{rng.randint(10**7, 10**8 - 1)}"
+                rescan["sku"] = messy_sku(sku.sku_id, rng)
+                pos_rows.append(rescan)
+                sold_recorded += qty
+                magnitude = qty
+                note = f"{qty} units rung twice at the till on the same day"
 
             # --- emit delivery row ---------------------------------------------
             if delivered_recorded > 0 or defer_delivery:
@@ -211,8 +273,9 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                 qty_field = (
                     delivered_actual if defer_delivery else delivered_recorded
                 )
+                docket_no = f"D{rng.randint(10**6, 10**7 - 1)}"
                 delivery_rows.append({
-                    "docket_no": f"D{rng.randint(10**6, 10**7 - 1)}",
+                    "docket_no": docket_no,
                     "delivery_date": messy_date(recorded_date, rng),
                     "supplier": rng.choice([
                         sku.supplier, sku.supplier.upper(), f" {sku.supplier}"
@@ -224,6 +287,21 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                     ),
                     "unit_cost": messy_money(sku.unit_cost_nzd, rng),
                 })
+
+                # The receiving note records what was physically counted off
+                # the truck, dated when the truck arrived — which is not the
+                # invoice date when the paperwork runs late. Where invoice and
+                # GRN disagree, the GRN is the one that touched the stock.
+                if grn_rng.random() < GRN_COVERAGE:
+                    grn_rows.append({
+                        "grn_no": f"G{grn_rng.randint(10**5, 10**6 - 1)}",
+                        "docket_no": docket_no,
+                        "received_date": messy_date(delivery_date, grn_rng),
+                        "sku": messy_sku(sku.sku_id, grn_rng),
+                        "qty_counted": messy_qty(delivered_actual, grn_rng),
+                        "checked_by": grn_rng.choice(
+                            ["J. Ruka", "priya s", "M Tanner", ""]),
+                    })
 
             # --- emit stock count row -------------------------------------------
             count_rows.append({
@@ -240,6 +318,7 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
 
     _write(out_dir / "pos_sales.csv", pos_rows)
     _write(out_dir / "deliveries.csv", delivery_rows)
+    _write(out_dir / "goods_received.csv", grn_rows)
     _write(out_dir / "stock_counts.csv", count_rows)
     _write(
         out_dir / "labels.csv",
@@ -257,6 +336,7 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
     return {
         "pos_rows": len(pos_rows),
         "delivery_rows": len(delivery_rows),
+        "grn_rows": len(grn_rows),
         "count_rows": len(count_rows),
         "cases": len(labels),
     }

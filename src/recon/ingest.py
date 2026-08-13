@@ -50,6 +50,7 @@ class CaseEvidence:
     sales: list[dict] = field(default_factory=list)
     deliveries: list[dict] = field(default_factory=list)
     late_deliveries: list[dict] = field(default_factory=list)
+    goods_received: dict[str, dict] = field(default_factory=dict)  # by docket_no
 
 
 @dataclass
@@ -153,6 +154,7 @@ def load_pos(path: Path, result: IngestResult) -> list[dict]:
                 "sale_date": normalise_date(raw["sale_date"]),
                 "sku_id": normalise_sku(raw["sku"]),
                 "qty": normalise_qty(raw["qty"]),
+                "till": (raw.get("till") or "").strip(),
             })
         except (ValueError, KeyError) as exc:
             result.rejections.append(Rejection("pos_sales", raw, str(exc)))
@@ -174,6 +176,29 @@ def load_deliveries(path: Path, result: IngestResult) -> list[dict]:
             })
         except (ValueError, KeyError) as exc:
             result.rejections.append(Rejection("deliveries", raw, str(exc)))
+    return rows
+
+
+def load_goods_received(path: Path, result: IngestResult) -> list[dict]:
+    """Receiving notes, keyed back to the delivery docket they check.
+
+    Absent entirely on a store that never files them, so a missing file is
+    not an error — it is a store whose short deliveries are unprovable.
+    """
+    if not path.exists():
+        return []
+    rows = []
+    for raw in _read(path):
+        try:
+            rows.append({
+                "grn_no": (raw.get("grn_no") or "").strip(),
+                "docket_no": (raw.get("docket_no") or "").strip(),
+                "received_date": normalise_date(raw["received_date"]),
+                "sku_id": normalise_sku(raw["sku"]),
+                "qty_counted": normalise_qty(raw["qty_counted"]),
+            })
+        except (ValueError, KeyError) as exc:
+            result.rejections.append(Rejection("goods_received", raw, str(exc)))
     return rows
 
 
@@ -210,7 +235,10 @@ def build_cases(raw_dir: Path) -> IngestResult:
 
     pos = load_pos(raw_dir / "pos_sales.csv", result)
     deliveries = load_deliveries(raw_dir / "deliveries.csv", result)
+    grns = load_goods_received(raw_dir / "goods_received.csv", result)
     counts = load_counts(raw_dir / "stock_counts.csv", result)
+
+    grn_by_docket = {g["docket_no"]: g for g in grns if g["docket_no"]}
 
     # Bucket by SKU once. Scanning every row per case is O(cases x rows),
     # and the rules layer walks this same data again for each check.
@@ -235,6 +263,11 @@ def build_cases(raw_dir: Path) -> IngestResult:
                 evidence.deliveries.append(d)
             elif period_end < d["delivery_date"] <= period_end + LATE_DOCKET_WINDOW:
                 evidence.late_deliveries.append(d)
+            else:
+                continue
+            grn = grn_by_docket.get(d["docket_no"])
+            if grn is not None:
+                evidence.goods_received[d["docket_no"]] = grn
 
         result.cases.append(ReconciliationCase(
             case_id=c["count_id"],

@@ -90,13 +90,30 @@ def rule_late_delivery(case: ReconciliationCase, ev: CaseEvidence, prior) -> Fin
     if case.discrepancy <= 0:
         return None
     for d in ev.late_deliveries:
-        if d["qty_received"] == case.discrepancy:
-            return Finding(
-                case.case_id, Cause.LATE_DELIVERY, case.discrepancy, "late_delivery",
-                f"docket {d['docket_no']} dated {d['delivery_date']} is after the "
-                f"{case.period_end} count but its {d['qty_received']} units were on "
-                f"the shelf when the count happened",
-            )
+        if d["qty_received"] != case.discrepancy:
+            continue
+        # The window that catches a late invoice also catches next week's
+        # ordinary delivery, which sits 1-3 days past the count for entirely
+        # innocent reasons. Matching on quantity alone let a routine docket
+        # explain a gap it had nothing to do with. Two ways to tell them
+        # apart, either sufficient: this week booked no delivery at all, so
+        # the docket has nowhere else to belong; or the receiving note
+        # proves the stock was counted off the truck before the stocktake.
+        grn = ev.goods_received.get(d["docket_no"])
+        arrived_before_count = grn is not None and grn["received_date"] <= case.period_end
+        if ev.deliveries and not arrived_before_count:
+            continue
+        proof = (
+            f"GRN {grn['grn_no']} counted them in on {grn['received_date']}"
+            if arrived_before_count
+            else "no delivery was booked to this period at all"
+        )
+        return Finding(
+            case.case_id, Cause.LATE_DELIVERY, case.discrepancy, "late_delivery",
+            f"docket {d['docket_no']} dated {d['delivery_date']} is after the "
+            f"{case.period_end} count but its {d['qty_received']} units were on "
+            f"the shelf when the count happened; {proof}",
+        )
     return None
 
 
@@ -122,6 +139,36 @@ def rule_late_carryover(case: ReconciliationCase, ev: CaseEvidence, prior) -> Fi
     )
 
 
+def rule_short_delivery(case: ReconciliationCase, ev: CaseEvidence, prior) -> Finding | None:
+    """The supplier invoiced more than the truck actually carried.
+
+    This is provable only against a goods-received note. Where no GRN was
+    filed there is one number and no way to challenge it, and the case has
+    to fall through to the residue — an unprovable short delivery is
+    indistinguishable from wastage on the numbers alone.
+
+    Restricted to EACH dockets: a CASE docket disagreeing with its GRN is a
+    unit mismatch, which is a different fault with a different correction.
+    """
+    if case.discrepancy >= 0:
+        return None
+    for d in ev.deliveries:
+        if d["uom"] != "EACH":
+            continue
+        grn = ev.goods_received.get(d["docket_no"])
+        if grn is None:
+            continue
+        shortfall = d["qty_received"] - grn["qty_counted"]
+        if shortfall > 0 and shortfall == -case.discrepancy:
+            return Finding(
+                case.case_id, Cause.SHORT_DELIVERY, case.discrepancy, "short_delivery",
+                f"docket {d['docket_no']} invoices {d['qty_received']} units but "
+                f"GRN {grn['grn_no']} counted {grn['qty_counted']} off the truck; "
+                f"{shortfall} short",
+            )
+    return None
+
+
 def rule_duplicate_scan(case: ReconciliationCase, ev: CaseEvidence, prior) -> Finding | None:
     """A till that rang the same line twice.
 
@@ -131,9 +178,14 @@ def rule_duplicate_scan(case: ReconciliationCase, ev: CaseEvidence, prior) -> Fi
     """
     if case.discrepancy <= 0:
         return None
+    # Keyed on till as well as date and quantity. An operator re-rings a
+    # line on the till in front of them, so a genuine pair shares one. Two
+    # customers buying the same quantity of the same item on the same day is
+    # ordinary trade, and without the till in the key that coincidence was
+    # being reported as a double-scan whenever it happened to match the gap.
     seen: dict[tuple, dict] = {}
     for sale in ev.sales:
-        key = (sale["sale_date"], sale["qty"])
+        key = (sale["sale_date"], sale["qty"], sale["till"])
         twin = seen.get(key)
         if twin is not None and sale["qty"] == case.discrepancy:
             return Finding(
@@ -152,6 +204,7 @@ RULES = (
     rule_late_carryover,
     rule_unit_mismatch,
     rule_late_delivery,
+    rule_short_delivery,
     rule_duplicate_scan,
 )
 
