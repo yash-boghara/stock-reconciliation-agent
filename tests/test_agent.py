@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 from src.recon.agent import (
     JUDGEMENT_CAUSES,
+    _explain,
     CaseFile,
     HeuristicClient,
     build_brief,
@@ -199,6 +200,54 @@ class TestStaffNotes(unittest.TestCase):
             hit = any(phrase in text.lower()
                       for phrase, _ in HeuristicClient.KEYWORDS)
             self.assertFalse(hit, f"keyword list unexpectedly reads: {text!r}")
+
+
+class TestFailureMessages(unittest.TestCase):
+    """A path the README tells people to run must fail in words, not in a
+    stack trace ending inside the SDK's base client.
+
+    The SDK is not installed in CI, so the exception classes are stubbed —
+    `_explain` only needs the namespace to isinstance against.
+    """
+
+    def setUp(self):
+        class APIStatusError(Exception):
+            def __init__(self, message, status_code=400):
+                super().__init__(message)
+                self.message = message
+                self.status_code = status_code
+
+        class BadRequestError(APIStatusError): pass
+        class AuthenticationError(APIStatusError): pass
+        class RateLimitError(APIStatusError): pass
+        class APIConnectionError(Exception): pass
+
+        self.sdk = SimpleNamespace(
+            APIStatusError=APIStatusError,
+            BadRequestError=BadRequestError,
+            AuthenticationError=AuthenticationError,
+            RateLimitError=RateLimitError,
+            APIConnectionError=APIConnectionError,
+        )
+
+    def test_no_credit_is_named_as_a_billing_problem(self):
+        exc = self.sdk.BadRequestError(
+            "Your credit balance is too low to access the Anthropic API.")
+        hint = _explain(exc, self.sdk)
+        self.assertIn("no credit", hint)
+        self.assertIn("Plans & Billing", hint)
+
+    def test_a_rejected_key_is_not_reported_as_billing(self):
+        hint = _explain(self.sdk.AuthenticationError("invalid x-api-key"), self.sdk)
+        self.assertIn("key was rejected", hint)
+        self.assertNotIn("credit", hint)
+
+    def test_unrecognised_errors_are_left_to_re_raise(self):
+        """Swallowing an unknown failure is worse than an ugly traceback."""
+        self.assertIsNone(_explain(ValueError("something new"), self.sdk))
+
+    def test_offline_runs_never_consult_the_sdk(self):
+        self.assertIsNone(_explain(ValueError("x"), None))
 
 
 class StubResponse(SimpleNamespace):

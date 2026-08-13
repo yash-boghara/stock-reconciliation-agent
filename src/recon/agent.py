@@ -459,6 +459,35 @@ def _read_verdict(case, response, tool_calls: int, usage: dict) -> Verdict:
     )
 
 
+def _explain(exc: Exception, sdk: Any | None) -> str | None:
+    """Turn the failures people actually hit into one actionable line.
+
+    A stack trace ending in `_base_client.py` tells a reader nothing about
+    what to do next, and this is a path the README invites them to run. Only
+    the recognised cases are handled — anything else re-raises with its
+    traceback intact, because a swallowed unknown error is worse than an
+    ugly one.
+    """
+    if sdk is None:
+        return None
+    message = str(getattr(exc, "message", "") or exc)
+
+    if isinstance(exc, sdk.AuthenticationError):
+        return ("the API key was rejected. Check ANTHROPIC_API_KEY is set to a "
+                "current key from console.anthropic.com/settings/keys.")
+    if isinstance(exc, sdk.BadRequestError) and "credit balance" in message:
+        return ("the API key is valid but the account has no credit. Add some "
+                "under Plans & Billing in the Anthropic console, then re-run. "
+                "This run needs roughly a dollar or two.")
+    if isinstance(exc, sdk.RateLimitError):
+        return "the account is rate limited right now. Wait and re-run."
+    if isinstance(exc, sdk.APIConnectionError):
+        return "the API was unreachable. Check the network and re-run."
+    if isinstance(exc, sdk.APIStatusError):
+        return f"the API returned {exc.status_code}: {message}"
+    return None
+
+
 def residue_cases(result: IngestResult, findings: dict[str, Finding]) -> list:
     return [c for c in result.cases if not findings[c.case_id].resolved]
 
@@ -495,12 +524,23 @@ if __name__ == "__main__":
     labels = load_labels(raw)
 
     client = None
+    sdk = None
     if os.environ.get("RECON_USE_MODEL"):
-        import anthropic  # imported lazily so the offline path needs no SDK
+        import anthropic as sdk  # imported lazily so the offline path needs no SDK
 
-        client = anthropic.Anthropic()
+        client = sdk.Anthropic()
 
-    verdicts = classify_residue(result, findings, client=client)
+    try:
+        verdicts = classify_residue(result, findings, client=client)
+    except Exception as exc:  # noqa: BLE001 — re-raised below unless recognised
+        hint = _explain(exc, sdk)
+        if hint is None:
+            raise
+        print(f"\nThe model path could not run: {hint}\n")
+        print("The heuristic control needs no key and no credit — it is the")
+        print("number the model has to beat anyway:\n")
+        print("    python3 -m src.recon.agent\n")
+        raise SystemExit(1)
     correct = sum(1 for cid, v in verdicts.items() if v.cause.value == labels[cid])
     label = "claude" if client else "heuristic control"
     print(f"residue cases : {len(verdicts)}")
