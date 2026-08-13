@@ -37,6 +37,13 @@ from src.recon.rules import classify
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "raw"
 
+RECURRENCE_STEMS = (
+    "facing looks light",
+    "third week running",
+    "front of shop",
+    "same as last week",
+)
+
 
 def setUpModule():
     """Generate the dataset this module reads.
@@ -186,6 +193,34 @@ class TestStaffNotes(unittest.TestCase):
             if match is not None:
                 self.assertEqual(match[0].value, labels[case.case_id],
                                  f"{case.case_id}: keyword matched the wrong cause")
+
+    def test_notes_claiming_recurrence_are_corroborated_by_the_record(self):
+        """A note reading "third week running" is a claim about history, and
+        a careful reader will check it. If the record disagrees, the data
+        punishes exactly the reasoning it should reward — the model found
+        this by declining to trust an uncorroborated note, and was scored
+        wrong for being right.
+        """
+        for seed in (1, 5, 11, 20260814):
+            with self.subTest(seed=seed), tempfile.TemporaryDirectory() as tmp:
+                raw = Path(tmp)
+                generate(raw, seed=seed)
+                result, findings = pipeline(raw)
+                casefile = CaseFile(result, findings)
+                for case in result.cases:
+                    notes = casefile.get_staff_notes(case.case_id)["notes"]
+                    text = " ".join(n["text"].lower() for n in notes)
+                    # Only the phrases that assert a history of losses. A
+                    # short delivery note reading "short on cereal again from
+                    # this supplier" is a claim about the supplier, not about
+                    # the stock record, and is nobody's business here.
+                    if any(stem in text for stem in RECURRENCE_STEMS):
+                        history = casefile.get_sku_history(case.sku_id, case.case_id)
+                        self.assertGreaterEqual(
+                            history["unexplained_negative_weeks"], 2,
+                            f"{case.case_id}: note claims a pattern the record "
+                            f"does not carry",
+                        )
 
     def test_oblique_phrasings_defeat_the_keyword_list(self):
         """The model's entire headroom is here. If a keyword list could read

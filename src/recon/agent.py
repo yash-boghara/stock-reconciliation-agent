@@ -539,6 +539,12 @@ if __name__ == "__main__":
 
     root = Path(__file__).resolve().parents[2]
     raw = root / "data" / "raw"
+    if not (raw / "stock_counts.csv").exists():
+        # data/ is not committed and regenerates from a fixed seed, so a
+        # clean checkout should just work rather than fail on a missing file.
+        from .generate import generate
+
+        generate(raw)
     result = build_cases(raw)
     findings = classify(result)
     labels = load_labels(raw)

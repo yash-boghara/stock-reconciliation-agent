@@ -56,12 +56,15 @@ NOTE_TEMPLATES: dict[Cause, tuple[str, ...]] = {
         "dumped some {item}, smelled off",
         "{n} {item} damaged in the crate, not sellable",
     ),
+    # Split by whether the note asserts a pattern. A note reading "third week
+    # running" is a claim about history, and a reader that cross-checks it
+    # against the record is doing exactly the right thing — so the record has
+    # to agree. Emitting recurrence language on a SKU with a clean history
+    # punishes the careful reader and rewards the credulous one, which
+    # inverts what the evaluation is supposed to measure.
     Cause.SHRINKAGE: (
-        "{item} facing looks light again",
-        "third week running we're down on {item}",
         "someone's helping themselves to the {item}",
         "{item} shelf keeps emptying faster than it sells",
-        "front of shop {item} gone again, nothing rung up",
         "asked the team about the {item}, nobody knows",
         "{item} walking out the door, need to move it behind the counter",
     ),
@@ -80,6 +83,14 @@ NOTE_TEMPLATES: dict[Cause, tuple[str, ...]] = {
         "short on {item} again from this supplier",
     ),
 }
+
+# Only emitted once the SKU's record actually shows the pattern they claim.
+SHRINKAGE_RECURRING_NOTES = (
+    "{item} facing looks light again",
+    "third week running we're down on {item}",
+    "front of shop {item} gone again, nothing rung up",
+    "that's {item} short again, same as last week",
+)
 
 # Notes about anything else. Staff write about the whole shop, so a note
 # existing is not evidence on its own.
@@ -238,6 +249,9 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
     # fault produces a discrepancy in two consecutive weeks with opposite
     # signs; both halves need a label or the eval set contradicts itself.
     pending_carryover: dict[str, int] = {}
+    # Weeks so far where this SKU lost stock with no structural explanation.
+    # A note may only claim a pattern once the record carries one.
+    unexplained_history: dict[str, int] = {}
 
     for week in range(PERIOD_WEEKS):
         p_start = START + timedelta(days=7 * week)
@@ -439,7 +453,11 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
             item = sku.description.split(" ")[0].lower()
             if (cause in NOTE_TEMPLATES
                     and note_rng.random() < NOTE_COVERAGE):
-                template = note_rng.choice(NOTE_TEMPLATES[cause])
+                pool = NOTE_TEMPLATES[cause]
+                if (cause is Cause.SHRINKAGE
+                        and unexplained_history.get(sku.sku_id, 0) >= 2):
+                    pool = pool + SHRINKAGE_RECURRING_NOTES
+                template = note_rng.choice(pool)
                 note_rows.append({
                     "note_id": f"N{note_rng.randint(10**5, 10**6 - 1)}",
                     "note_date": messy_date(
@@ -457,6 +475,11 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                     "author": note_rng.choice(STAFF),
                     "text": note_rng.choice(NOISE_NOTES).format(item=item),
                 })
+
+            if cause in {Cause.SHRINKAGE, Cause.UNLOGGED_WASTAGE, Cause.MISCOUNT} \
+                    and magnitude < 0:
+                unexplained_history[sku.sku_id] = (
+                    unexplained_history.get(sku.sku_id, 0) + 1)
 
             labels.append(Label(case_id, cause, magnitude, note))
             on_hand[sku.sku_id] = closing

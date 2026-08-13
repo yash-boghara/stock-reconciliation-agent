@@ -193,11 +193,11 @@ available feature:
 | Majority class (always guess the mode) | 41.5% |
 | Structured features only, Bayes-optimal | ~78% |
 | Heuristic control, structure only | 75.0% |
-| **Heuristic control + keyword-matched notes** | **84.2%** |
-| **Ceiling if the notes were read properly** | **89.8%** |
+| **Heuristic control + keyword-matched notes** | **83.4%** |
+| **Ceiling if the informative notes were read** | **88.8%** |
 
 Measured over 1798 residue cases across 40 seeds. End-to-end, rules plus the
-control reconcile **95.3%** of all cases (min 92.0%, max 98.0%).
+control reconcile **95.0%** of all cases.
 
 The first measurement said don't build it. On structured features alone the
 control reached 75.0% against a 78% ceiling — three points of headroom, which
@@ -211,14 +211,14 @@ written the way people write: `binned 5 butter, past date`, but also
 we're down on paper`.
 
 **A keyword list reads 57.8% of the notes and never misreads one.** The other
-**438 — 24.4% of the whole residue — are phrased too obliquely for any word
-list**, and that is precisely the 5.6 points between the control and the
+**418 — 23% of the whole residue — are phrased too obliquely for any word
+list**, and that is precisely the 5.4 points between the control and the
 ceiling. Recognising that *wouldn't keep till Monday* means spoilage, and
 that *third week running* means recurrence, is the thing a language model
 does and a regex cannot.
 
 That is a quantified case for a model rather than an assumed one — and it is
-5.6 points on the residue, which is about 1.3 points end-to-end. Whether that
+5.4 points on the residue, which is about 1.3 points end-to-end. Whether that
 pays is a cost decision, and it tilts sharply as the free-text share grows:
 a real store's evidence is far more note and far less spreadsheet.
 
@@ -242,6 +242,42 @@ five example rows makes the next question cost another run.
 The control is not a mock. It answers the same tool calls against the same
 evidence, so CI exercises the whole harness on every push without an API key,
 and the number it produces is the bar the model has to clear.
+
+### What running it actually showed
+
+Claude scored **7/9 on the contested cases — identical to the control, on
+every case, including both misses**. It called all three tools every time, so
+retrieval was not the problem. The measurement did not show a model advantage.
+
+It did something more useful. Both misses came with rationales, and both
+rationales were right about the evidence:
+
+- On one case the model said *"the staff note is irrelevant (drinks bay
+  planogram)"*. It was: **9% of contested cases carry a pure noise note**, so
+  there was nothing to read and nobody could have won it.
+- On the other it declined to trust a note claiming a three-week run of
+  losses, because *"history shows zero unexplained negative weeks, so the
+  staff note isn't corroborated by the record"*. That was also true —
+  **half the recurrence-claiming notes contradicted the record**, because the
+  generator wrote "third week running" without checking whether the record
+  carried a run.
+
+The second one is a broken evaluation signal: a model that trusts the note
+scores well, and a model that cross-checks it scores badly. That inverts what
+the eval is supposed to reward. Recurrence notes are now only emitted once the
+record actually shows the pattern, and a test pins it.
+
+So the model earned its keep here by auditing the dataset rather than by
+beating the baseline — which is worth more than the 5.4 points would have
+been. A note on scale, though: 9 contested cases cannot resolve a 5.4-point
+effect. That comparison is directional at best, and calling the tie a result
+would be reading noise.
+
+One artifact worth recording: a returned `rationale` came back with stray
+tokens appended (`</parameter>|<br>...`). The `cause` field was unaffected
+because it is schema-constrained to an enum — which is the argument for
+constraining the field that drives the decision and treating free text as
+advisory.
 
 ### An earlier version of this residue was unmeasurable
 
