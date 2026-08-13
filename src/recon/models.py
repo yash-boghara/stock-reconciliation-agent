@@ -61,6 +61,7 @@ class Sku:
     case_size: int       # units per case as shipped
     unit_cost_nzd: float
     high_value: bool     # theft-prone: tobacco, energy drinks, batteries
+    perishable: bool     # short shelf life, so spoilage is a live risk
 
 
 @dataclass(frozen=True)
@@ -96,32 +97,36 @@ class Label:
     note: str
 
 
+# high_value and perishable are the two properties that separate the causes
+# rules cannot reach. Theft concentrates on small, valuable, easily pocketed
+# lines; spoilage concentrates on short-dated ones. A miscount respects
+# neither — which is what makes it the genuinely hard class.
 CATALOGUE: list[Sku] = [
-    Sku("BEV-0142", "Energy drink 250ml", "Coastline Beverages", 24, 2.10, True),
-    Sku("BEV-0143", "Energy drink 500ml", "Coastline Beverages", 12, 3.40, True),
-    Sku("BEV-0210", "Bottled water 750ml", "Coastline Beverages", 12, 0.95, False),
-    Sku("BEV-0288", "Cola 1.5L", "Coastline Beverages", 8, 2.60, False),
-    Sku("SNK-1001", "Potato chips 150g", "Harbour Snack Co", 18, 1.80, False),
-    Sku("SNK-1044", "Chocolate bar 50g", "Harbour Snack Co", 36, 1.20, True),
-    Sku("SNK-1077", "Mixed nuts 200g", "Harbour Snack Co", 12, 4.50, False),
-    Sku("SNK-1090", "Biscuits 250g", "Harbour Snack Co", 20, 2.35, False),
-    Sku("DRY-2003", "Instant noodles", "Ridgeline Wholesale", 24, 0.85, False),
-    Sku("DRY-2019", "Rice 1kg", "Ridgeline Wholesale", 10, 3.10, False),
-    Sku("DRY-2044", "Pasta sauce 500g", "Ridgeline Wholesale", 12, 2.95, False),
-    Sku("DRY-2071", "Breakfast cereal 500g", "Ridgeline Wholesale", 8, 4.20, False),
-    Sku("HHD-3011", "AA batteries 4pk", "Ridgeline Wholesale", 20, 5.60, True),
-    Sku("HHD-3025", "Dish soap 500ml", "Ridgeline Wholesale", 12, 2.80, False),
-    Sku("HHD-3060", "Paper towels 2pk", "Ridgeline Wholesale", 9, 3.75, False),
-    Sku("CHL-4002", "Milk 2L", "Vallance Dairy", 6, 4.10, False),
-    Sku("CHL-4008", "Cheese slices 250g", "Vallance Dairy", 12, 5.20, False),
-    Sku("CHL-4015", "Yoghurt 6pk", "Vallance Dairy", 8, 6.40, False),
-    Sku("CHL-4033", "Butter 500g", "Vallance Dairy", 10, 6.90, False),
-    Sku("FRZ-5001", "Ice cream 2L", "Vallance Dairy", 6, 7.50, False),
-    Sku("FRZ-5010", "Frozen chips 1kg", "Vallance Dairy", 8, 4.80, False),
-    Sku("TOB-6001", "Cigarettes 20pk", "Ridgeline Wholesale", 10, 38.00, True),
-    Sku("TOB-6004", "Rolling tobacco 30g", "Ridgeline Wholesale", 12, 52.00, True),
-    Sku("GRO-7001", "Bread loaf", "Harbour Snack Co", 12, 2.40, False),
-    Sku("GRO-7020", "Eggs 12pk", "Vallance Dairy", 6, 7.20, False),
+    Sku("BEV-0142", "Energy drink 250ml", "Coastline Beverages", 24, 2.10, True, False),
+    Sku("BEV-0143", "Energy drink 500ml", "Coastline Beverages", 12, 3.40, True, False),
+    Sku("BEV-0210", "Bottled water 750ml", "Coastline Beverages", 12, 0.95, False, False),
+    Sku("BEV-0288", "Cola 1.5L", "Coastline Beverages", 8, 2.60, False, False),
+    Sku("SNK-1001", "Potato chips 150g", "Harbour Snack Co", 18, 1.80, False, False),
+    Sku("SNK-1044", "Chocolate bar 50g", "Harbour Snack Co", 36, 1.20, True, False),
+    Sku("SNK-1077", "Mixed nuts 200g", "Harbour Snack Co", 12, 4.50, False, False),
+    Sku("SNK-1090", "Biscuits 250g", "Harbour Snack Co", 20, 2.35, False, False),
+    Sku("DRY-2003", "Instant noodles", "Ridgeline Wholesale", 24, 0.85, False, False),
+    Sku("DRY-2019", "Rice 1kg", "Ridgeline Wholesale", 10, 3.10, False, False),
+    Sku("DRY-2044", "Pasta sauce 500g", "Ridgeline Wholesale", 12, 2.95, False, False),
+    Sku("DRY-2071", "Breakfast cereal 500g", "Ridgeline Wholesale", 8, 4.20, False, False),
+    Sku("HHD-3011", "AA batteries 4pk", "Ridgeline Wholesale", 20, 5.60, True, False),
+    Sku("HHD-3025", "Dish soap 500ml", "Ridgeline Wholesale", 12, 2.80, False, False),
+    Sku("HHD-3060", "Paper towels 2pk", "Ridgeline Wholesale", 9, 3.75, False, False),
+    Sku("CHL-4002", "Milk 2L", "Vallance Dairy", 6, 4.10, False, True),
+    Sku("CHL-4008", "Cheese slices 250g", "Vallance Dairy", 12, 5.20, False, True),
+    Sku("CHL-4015", "Yoghurt 6pk", "Vallance Dairy", 8, 6.40, False, True),
+    Sku("CHL-4033", "Butter 500g", "Vallance Dairy", 10, 6.90, False, True),
+    Sku("FRZ-5001", "Ice cream 2L", "Vallance Dairy", 6, 7.50, False, False),
+    Sku("FRZ-5010", "Frozen chips 1kg", "Vallance Dairy", 8, 4.80, False, False),
+    Sku("TOB-6001", "Cigarettes 20pk", "Ridgeline Wholesale", 10, 38.00, True, False),
+    Sku("TOB-6004", "Rolling tobacco 30g", "Ridgeline Wholesale", 12, 52.00, True, False),
+    Sku("GRO-7001", "Bread loaf", "Harbour Snack Co", 12, 2.40, False, True),
+    Sku("GRO-7020", "Eggs 12pk", "Vallance Dairy", 6, 7.20, False, True),
 ]
 
 

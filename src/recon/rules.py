@@ -20,6 +20,11 @@ from .ingest import CaseEvidence, IngestResult
 from .models import CATALOGUE_INDEX, Cause, ReconciliationCase
 
 
+# How close in time two identical sales must be to count as one line rung
+# twice rather than two customers.
+RESCAN_WINDOW_SECONDS = 120
+
+
 @dataclass(frozen=True)
 class Finding:
     """A rule's verdict on one case.
@@ -178,16 +183,23 @@ def rule_duplicate_scan(case: ReconciliationCase, ev: CaseEvidence, prior) -> Fi
     """
     if case.discrepancy <= 0:
         return None
-    # Keyed on till as well as date and quantity. An operator re-rings a
-    # line on the till in front of them, so a genuine pair shares one. Two
-    # customers buying the same quantity of the same item on the same day is
-    # ordinary trade, and without the till in the key that coincidence was
-    # being reported as a double-scan whenever it happened to match the gap.
+    # Same till, same day, same quantity — and seconds apart. A re-ring
+    # happens while the operator is still standing at the till, so the two
+    # transactions are adjacent in time. Without the clock, one till serving
+    # the same quantity twice in a day was still enough to fire, which is
+    # ordinary trade on a busy line. Sales with no recorded time cannot
+    # establish adjacency, so they are not eligible to form a pair.
     seen: dict[tuple, dict] = {}
     for sale in ev.sales:
+        if sale["at"] is None:
+            continue
         key = (sale["sale_date"], sale["qty"], sale["till"])
         twin = seen.get(key)
-        if twin is not None and sale["qty"] == case.discrepancy:
+        adjacent = (
+            twin is not None
+            and abs(sale["at"] - twin["at"]) <= RESCAN_WINDOW_SECONDS
+        )
+        if adjacent and sale["qty"] == case.discrepancy:
             return Finding(
                 case.case_id, Cause.DUPLICATE_SCAN, case.discrepancy, "duplicate_scan",
                 f"transactions {twin['transaction_id']} and {sale['transaction_id']} "

@@ -41,15 +41,15 @@ is a deliberate part of the project rather than a preliminary.
 | `unit_mismatch` | yes | 100% | delivery logged in cases, counted as eaches |
 | `late_delivery` | yes | 100% | stock received before count, invoice dated after |
 | `late_carryover` | yes | 100% | previous period's late invoice landing now |
-| `duplicate_scan` | yes | 100% | same line rung twice, one till, one day |
-| `short_delivery` | only with a GRN | 70% | invoiced quantity exceeds what was counted in |
+| `duplicate_scan` | yes | 98.5% | same line rung twice, one till, seconds apart |
+| `short_delivery` | only with a GRN | 69% | invoiced quantity exceeds what was counted in |
 | `miscount` | no | — | the stocktake itself is wrong |
 | `unlogged_wastage` | no | — | damaged or expired stock discarded off-book |
 | `shrinkage` | no | — | unexplained loss, typically high-value lines |
 
-Recall is measured over 30 seeds, not asserted. `short_delivery` is the
-honest entry: it cannot beat 70% because that is how often a receiving note
-exists to prove it — see *Baseline*.
+Recall is measured over 40 seeds, not asserted. `short_delivery` cannot beat
+70% because that is how often a receiving note exists to prove it, and
+`duplicate_scan` declines the pairs it cannot time — see *Baseline*.
 
 `late_delivery` and `late_carryover` are two halves of one fault: a single
 late invoice produces discrepancies in consecutive weeks with opposite
@@ -72,7 +72,9 @@ across runs are comparable.
 Current dataset: 150 cases over 6 weeks and 25 SKUs — 71 clean, 79 with a
 planted cause.
 
-Five documents are emitted. `goods_received.csv` is the one that carries
+Six columns of the POS export matter beyond the obvious: `till` and
+`sale_time` are what separate a genuine re-ring from two customers buying the
+same thing on the same day. Five documents are emitted. `goods_received.csv` is the one that carries
 weight: it records what was counted off the truck, and it exists for only
 70% of deliveries. That figure is deliberate. A GRN is the only document
 that can prove a short delivery, and receiving paperwork is the first thing
@@ -86,32 +88,35 @@ Normalisation is strict. Unparseable rows are quarantined rather than
 coerced, because a row guessed wrong here becomes a phantom discrepancy
 three layers up, and the agent then burns tokens explaining a bug.
 
-One distinction worth noting: an identical `transaction_id` appearing twice
-is an export artifact and gets dropped, while a genuine till double-scan
-produces a *separate* transaction and is kept. The second one is a real
-discrepancy the system exists to catch, not noise to clean away.
+One distinction worth noting: a *byte-identical* row appearing twice is an
+export artifact and gets dropped, while a genuine till double-scan produces a
+separate transaction and is kept. The second one is a real discrepancy the
+system exists to catch, not noise to clean away.
+
+Matching on the transaction id alone was not enough, and the integrity test
+proved it — see *What the integrity test caught, twice*.
 
 ## Baseline
 
 How far the rules get with no model involved, on the default seed:
 
 ```
-overall accuracy  108/150  (72.0%)
-rules committed        37  (100% precision)
-left as residue        42  (28.0%)
+overall accuracy  115/150  (76.7%)
+rules committed        40  (100% precision)
+left as residue        35  (23.3%)
 ```
 
-Over 30 seeds — 1226 commitments, **zero misclassifications**:
+Over 40 seeds — 1585 commitments, **zero misclassifications**:
 
-| Cause | Recall (30 seeds) | Bounded by |
+| Cause | Recall (40 seeds) | Bounded by |
 |---|---|---|
 | `unit_mismatch` | 100% | — |
 | `late_delivery` | 100% | — |
 | `late_carryover` | 100% | — |
-| `duplicate_scan` | 100% | — |
-| `short_delivery` | 69.5% | GRN coverage (70%) |
+| `duplicate_scan` | 98.5% | pairs it cannot time |
+| `short_delivery` | 69.0% | GRN coverage (70%) |
 
-Accuracy ranges 63.3%–76.7% across seeds, mean 70.8%. The spread is the
+Accuracy ranges 59.3%–80.7% across seeds, mean 70.0%. The spread is the
 cause mix moving, not the rules wobbling.
 
 Precision is the property under test. Recall can be improved later; a
@@ -136,15 +141,18 @@ concealed, in two distinct channels:
   receiving note placing the stock on the shelf before the count.
 - **Ordinary trade read as a double-scan.** Two customers buying the same
   quantity of the same item on the same day is not a till error. Keying the
-  pair on till as well as date and quantity separates a re-ring from a
-  coincidence, because an operator re-rings on the till in front of them.
+  pair on till narrowed it; a later sweep found the coincidence still firing
+  on one busy till, so the rule now also requires the two sales to be within
+  two minutes of each other. A re-ring happens while the operator is still
+  standing there. Sales with no recorded time cannot establish adjacency, so
+  the rule declines them — which is the 1.5% of recall it gives up.
 
-Both fixes add evidence rather than thresholds, and neither costs recall.
+Both fixes add evidence rather than thresholds.
 
-### What the integrity test caught
+### What the integrity test caught, twice
 
-The dataset-integrity check failed on `FRZ-5001-W05: label=none but
-discrepancy=1`. A week opened with 11 units, received 6, and sold 18 — more
+**A clean week that sold stock it never had.** The check failed on
+`FRZ-5001-W05: label=none but discrepancy=1`. A week opened with 11 units, received 6, and sold 18 — more
 than ever existed — because the sales draw had a floor of 15 regardless of
 stock on hand. The negative close was then floored at zero, and that clamp
 manufactured a one-unit discrepancy in a case labelled clean.
@@ -155,21 +163,74 @@ Silently flooring it corrupts the evaluation set rather than the run that
 produced it, which is the more expensive failure: every accuracy figure
 measured afterwards is quietly wrong.
 
-## Residue
+**A real sale deleted as a duplicate.** Sweeping 40 seeds turned up a second
+clean week carrying a −13 discrepancy. Two unrelated sales — different SKU,
+date, quantity and till — had drawn the same random `transaction_id`, and
+ingest dropped the second as an export artifact, deleting 13 units of real
+revenue and inventing a shortfall in a week that balanced.
 
-42 cases reach the agent layer on the default seed:
+Deduplication now matches on the whole row, since a faulty export repeats a
+row outright and every field agrees. Two rows sharing an id while disagreeing
+on everything else are two real sales, and the generator no longer mints
+colliding ids in the first place. Zero integrity violations across 60 seeds.
 
-| Cause | Cases | Why rules cannot close it |
-|---|---|---|
-| `unlogged_wastage` | 25 | no record exists of stock discarded off-book |
-| `miscount` | 13 | the count is wrong; nothing else disagrees |
-| `shrinkage` | 3 | absence of evidence is the evidence |
-| `short_delivery` | 1 | no receiving note was filed |
+## The agent layer, and what measuring it showed
 
-The first three are numerically identical — a small negative gap — and can
-only be separated with context: item value, prior resolutions for the SKU
-and supplier, wastage patterns on the line. That is the agent's job, and
-the population is now clean enough to state it precisely.
+35 cases reach the agent on the default seed — mostly `miscount` (17) and
+`unlogged_wastage` (16). They are numerically identical small negative gaps,
+separable only with context.
+
+Before building anything, the residue was measured for how much context is
+*there to use* — the accuracy a perfect classifier could reach given every
+available feature:
+
+| Classifier over the residue | Accuracy |
+|---|---|
+| Majority class (always guess the mode) | 41.5% |
+| Bayes-optimal ceiling, all features | ~78% |
+| **Heuristic control — no model, ~20 lines** | **75.0%** |
+
+Measured over 1798 residue cases across 40 seeds. End-to-end, rules plus the
+control reconcile **92.5%** of all cases (min 88.0%, max 96.0%).
+
+**The control lands within 3 points of the ceiling.** The context that
+separates these causes — is the line short-dated, is it theft-prone, has it
+lost stock in other weeks — is structured, and structured context is what
+code is good at. On this data an LLM has at most three points of headroom,
+which does not pay for a model call per case.
+
+That is a finding, not a failure, and it is the one the project was built to
+produce: *measure the cheap layer before assuming the expensive one is
+needed*. The agent is implemented and correct — schema-validated tools,
+prompt caching, structured verdicts, token accounting — and it stays off by
+default:
+
+```bash
+python3 -m src.recon.agent                  # heuristic control (free, offline)
+RECON_USE_MODEL=1 python3 -m src.recon.agent # same harness, via Claude
+```
+
+Where a model would earn its place is evidence code cannot parse: supplier
+emails disputing a delivery, a staff note reading *"dropped a tray of eggs
+Thursday"*, a handwritten wastage book. That is the next thing worth
+building — not a better prompt over the same four numbers.
+
+### An earlier version of this residue was unmeasurable
+
+The first pass planted the three judgement causes uniformly across the
+catalogue, distinguished only by magnitude — and their magnitude ranges
+overlap almost entirely. Measured, that residue had a Bayes ceiling of
+**61.3%** against a 43.5% majority baseline, and an optimal classifier
+*never predicted shrinkage at all*, because shrinkage was never the most
+likely cause at any magnitude. The `high_value` flag was pure noise: 26% of
+shrinkage cases against a 24% base rate, despite a taxonomy note claiming
+theft concentrates on high-value lines.
+
+So the generator, not the agent, was the limit. Spoilage now lands on
+short-dated stock and scales with volume handled; theft lands on a fixed set
+of theft-prone lines and recurs across weeks. `miscount` deliberately got no
+pattern at all — it is the residual explanation, and it should be the hard
+one. Ceiling moved 61.3% → 78%, and shrinkage became predictable.
 
 ## Status
 
@@ -181,13 +242,18 @@ Built:
 - Ingestion and normalisation layer with quarantine
 - Deterministic rules layer, with pair rules spanning adjacent periods
 - Evaluation harness reporting per-cause precision and recall
-- 32 tests: dataset integrity, generator invariants, per-rule declining
-  cases, a multi-seed precision check, and a pinned baseline
+- Agent layer over the residue: two schema-validated retrieval tools, prompt
+  caching, structured verdicts, token accounting, and a no-model control
+  that doubles as the offline test double
+- 45 tests: dataset integrity, generator invariants, per-rule declining
+  cases, a multi-seed precision check, a label-leakage guard, and pinned
+  baselines for both layers
 - CI running the whole pipeline on every push
 
 Next:
 
-- Agent layer over the ambiguous residue, with narrow schema-validated tools
+- Free-text evidence (delivery notes, staff wastage notes) — the point at
+  which a model does something code cannot
 - Retrieval over resolved historical cases (pgvector)
 - Postgres persistence, containerised API, review interface, cost tracking
 - Retrieval over resolved historical cases (pgvector)
@@ -200,6 +266,7 @@ python3 -m src.recon.generate          # writes data/raw/
 python3 -m src.recon.ingest            # assembles cases, reports rejections
 python3 -m src.recon.rules             # classifies what the rules can
 python3 -m src.recon.evaluate          # scores rules against ground truth
+python3 -m src.recon.agent             # classifies the residue (control)
 python3 -m unittest discover -s tests -t .
 ```
 

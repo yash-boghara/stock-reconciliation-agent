@@ -169,14 +169,28 @@ class TestConfusionsFoundBySeedSweep(unittest.TestCase):
         case = make_case(sold_units=16, closing_count=100 - 16 + 8)
         self.assertEqual(case.discrepancy, 8)
         coincidence = CaseEvidence(sales=[
-            {"transaction_id": "T1", "sale_date": MONDAY, "qty": 8, "till": "1"},
-            {"transaction_id": "T2", "sale_date": MONDAY, "qty": 8, "till": "3"},
+            {"transaction_id": "T1", "sale_date": MONDAY, "qty": 8, "till": "1", "at": 36000},
+            {"transaction_id": "T2", "sale_date": MONDAY, "qty": 8, "till": "3", "at": 36012},
         ])
         self.assertIsNone(rule_duplicate_scan(case, coincidence, None))
 
+        # Same till, but hours apart — two customers, not one re-ring.
+        far_apart = CaseEvidence(sales=[
+            {"transaction_id": "T1", "sale_date": MONDAY, "qty": 8, "till": "2", "at": 32400},
+            {"transaction_id": "T2", "sale_date": MONDAY, "qty": 8, "till": "2", "at": 61200},
+        ])
+        self.assertIsNone(rule_duplicate_scan(case, far_apart, None))
+
+        # A till with no recorded clock cannot establish adjacency at all.
+        untimed = CaseEvidence(sales=[
+            {"transaction_id": "T1", "sale_date": MONDAY, "qty": 8, "till": "2", "at": None},
+            {"transaction_id": "T2", "sale_date": MONDAY, "qty": 8, "till": "2", "at": None},
+        ])
+        self.assertIsNone(rule_duplicate_scan(case, untimed, None))
+
         same_till = CaseEvidence(sales=[
-            {"transaction_id": "T1", "sale_date": MONDAY, "qty": 8, "till": "2"},
-            {"transaction_id": "T2", "sale_date": MONDAY, "qty": 8, "till": "2"},
+            {"transaction_id": "T1", "sale_date": MONDAY, "qty": 8, "till": "2", "at": 36000},
+            {"transaction_id": "T2", "sale_date": MONDAY, "qty": 8, "till": "2", "at": 36018},
         ])
         finding = rule_duplicate_scan(case, same_till, None)
         self.assertIsNotNone(finding)
@@ -258,11 +272,11 @@ class TestBaseline(unittest.TestCase):
 
     def test_baseline_accuracy_holds(self):
         correct = sum(s.correct for s in self.scores.values())
-        self.assertEqual(correct, 108, "baseline moved; record the new figure")
+        self.assertEqual(correct, 115, "baseline moved; record the new figure")
 
     def test_residue_is_left_for_the_agent(self):
         residue = [f for f in self.findings.values() if not f.resolved]
-        self.assertEqual(len(residue), 42)
+        self.assertEqual(len(residue), 35)
 
     def test_short_delivery_recall_is_capped_by_receiving_notes(self):
         """Recall here is bounded by how often a GRN was filed, not by the

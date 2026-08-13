@@ -100,9 +100,31 @@ def messy_money(v: float, rng: random.Random) -> str:
 # Generation
 # ----------------------------------------------------------------------
 
-def _pick_cause(rng: random.Random) -> Cause:
+def _pick_cause(rng: random.Random, sku: Sku, shrink_prone: set[str]) -> Cause:
+    """Draw a cause, respecting where each one actually happens.
+
+    The three judgement causes were previously drawn uniformly across the
+    catalogue, which made them separable only by magnitude — and their
+    magnitude ranges overlap almost entirely. A classifier given every
+    available feature topped out barely above always-guess-the-majority, and
+    never predicted shrinkage at all, because shrinkage was never the most
+    likely cause at any magnitude.
+
+    That was a property of the generator, not of the problem. In a real store
+    spoilage lands on short-dated stock and theft lands on small valuable
+    lines, repeatedly, on the same SKUs. Planting them that way is what makes
+    context worth consulting — and what leaves miscount as the honestly hard
+    class, since a bad count respects no pattern at all.
+    """
     causes = list(CAUSE_WEIGHTS)
-    weights = [CAUSE_WEIGHTS[c] for c in causes]
+    weights = []
+    for cause in causes:
+        w = CAUSE_WEIGHTS[cause]
+        if cause is Cause.UNLOGGED_WASTAGE:
+            w *= 6.0 if sku.perishable else 0.25
+        elif cause is Cause.SHRINKAGE:
+            w *= 9.0 if sku.sku_id in shrink_prone else 0.05
+        weights.append(w)
     return rng.choices(causes, weights=weights, k=1)[0]
 
 
@@ -119,6 +141,20 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
     grn_rng = random.Random(seed ^ 0x9E3779B9)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Transaction ids must be unique by construction. Drawn independently they
+    # collide about once every few datasets (roughly 900 rows over 9e7 values),
+    # and a collision plants a fault the taxonomy has no label for — so the
+    # eval set would contain a discrepancy that is neither clean nor any
+    # planted cause.
+    issued_txn_ids: set[str] = set()
+
+    def next_txn_id() -> str:
+        while True:
+            candidate = f"T{rng.randint(10**7, 10**8 - 1)}"
+            if candidate not in issued_txn_ids:
+                issued_txn_ids.add(candidate)
+                return candidate
+
     pos_rows: list[dict] = []
     delivery_rows: list[dict] = []
     grn_rows: list[dict] = []
@@ -127,6 +163,15 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
 
     # Opening stock per SKU, carried forward week to week.
     on_hand = {s.sku_id: rng.randint(40, 220) for s in CATALOGUE}
+
+    # A store's theft problem sits on particular lines and stays there — the
+    # same tobacco and battery facings walk out week after week. Fixing the
+    # set per run is what makes a SKU's own history worth retrieving, rather
+    # than every high-value line being equally suspect forever.
+    shrink_prone = set(rng.sample(
+        [s.sku_id for s in CATALOGUE if s.high_value],
+        k=max(2, len([s for s in CATALOGUE if s.high_value]) // 2),
+    ))
     # SKUs whose late paperwork lands in the following period. One planted
     # fault produces a discrepancy in two consecutive weeks with opposite
     # signs; both halves need a label or the eval set contradicts itself.
@@ -144,7 +189,8 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
             delivered_actual = cases_in * sku.case_size
 
             carryover = pending_carryover.pop(sku.sku_id, 0)
-            cause = Cause.LATE_CARRYOVER if carryover else _pick_cause(rng)
+            cause = (Cause.LATE_CARRYOVER if carryover
+                     else _pick_cause(rng, sku, shrink_prone))
             magnitude = -carryover
             note = (
                 f"{carryover} units invoiced this period were received and"
@@ -188,7 +234,12 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                 note = "stocktake error"
 
             elif cause is Cause.UNLOGGED_WASTAGE:
-                magnitude = -rng.randint(2, 9)
+                # Spoilage scales with how much stock passed through the
+                # chiller that week, but only loosely — the ranges still
+                # overlap miscount and shrinkage, so magnitude alone stays
+                # ambiguous and the SKU's own profile has to do the work.
+                handled = opening + delivered_actual
+                magnitude = -rng.randint(2, max(4, min(12, handled // 25)))
                 note = "damaged or expired stock discarded without a wastage entry"
 
             elif cause is Cause.SHRINKAGE:
@@ -234,9 +285,11 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                 qty = min(remaining, rng.randint(3, 14))
                 remaining -= qty
                 sale_date = p_start + timedelta(days=rng.randint(0, 6))
+                seconds = rng.randint(8 * 3600, 20 * 3600)  # trading hours
                 row = {
-                    "transaction_id": f"T{rng.randint(10**7, 10**8 - 1)}",
+                    "transaction_id": next_txn_id(),
                     "sale_date": messy_date(sale_date, rng),
+                    "sale_time": f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}",
                     "sku": messy_sku(sku.sku_id, rng),
                     "qty": messy_qty(qty, rng),
                     "unit_price": messy_money(sku.unit_cost_nzd * 1.35, rng),
@@ -256,7 +309,11 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                 # noise the ingest layer is right to drop.
                 twin, qty = emitted[rng.randrange(len(emitted))]
                 rescan = dict(twin)
-                rescan["transaction_id"] = f"T{rng.randint(10**7, 10**8 - 1)}"
+                rescan["transaction_id"] = next_txn_id()
+                h, m, sec = (int(x) for x in twin["sale_time"].split(":"))
+                moment = h * 3600 + m * 60 + sec + rng.randint(4, 40)
+                rescan["sale_time"] = (
+                    f"{moment // 3600:02d}:{moment // 60 % 60:02d}:{moment % 60:02d}")
                 rescan["sku"] = messy_sku(sku.sku_id, rng)
                 pos_rows.append(rescan)
                 sold_recorded += qty

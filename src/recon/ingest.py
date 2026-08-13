@@ -115,6 +115,25 @@ def normalise_qty(raw: str) -> int:
     return int(round(value))
 
 
+def normalise_time(raw: str | None) -> int | None:
+    """Seconds past midnight, or None when the till did not record one.
+
+    None is not an error — plenty of exports omit it — but it does mean any
+    check that depends on two sales being seconds apart has to decline.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parts = [int(p) for p in text.split(":")]
+    except ValueError:
+        return None
+    if len(parts) != 3:
+        return None
+    hours, minutes, seconds = parts
+    return hours * 3600 + minutes * 60 + seconds
+
+
 def normalise_uom(raw: str | None) -> str:
     """Blank unit-of-measure is the norm, not an error — most systems omit
     it and mean eaches. CASE is the meaningful signal."""
@@ -143,18 +162,25 @@ def load_pos(path: Path, result: IngestResult) -> list[dict]:
     """
     rows, seen = [], set()
     for raw in _read(path):
-        tid = (raw.get("transaction_id") or "").strip()
-        if tid and tid in seen:
+        # Match on the whole row, not the transaction id alone. A faulty export
+        # repeats a row outright, so every field agrees. Two rows sharing an id
+        # while disagreeing on SKU, date or quantity are two real sales whose
+        # ids collided — dropping the second silently deletes revenue and
+        # invents a shortfall three layers up, in a week that actually
+        # balanced. Keep both and let the discrepancy stay honest.
+        fingerprint = tuple(sorted(raw.items()))
+        if fingerprint in seen:
             result.duplicates_dropped += 1
             continue
-        seen.add(tid)
+        seen.add(fingerprint)
         try:
             rows.append({
-                "transaction_id": tid,
+                "transaction_id": (raw.get("transaction_id") or "").strip(),
                 "sale_date": normalise_date(raw["sale_date"]),
                 "sku_id": normalise_sku(raw["sku"]),
                 "qty": normalise_qty(raw["qty"]),
                 "till": (raw.get("till") or "").strip(),
+                "at": normalise_time(raw.get("sale_time")),
             })
         except (ValueError, KeyError) as exc:
             result.rejections.append(Rejection("pos_sales", raw, str(exc)))
