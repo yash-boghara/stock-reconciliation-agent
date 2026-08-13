@@ -1,0 +1,12 @@
+# Generated data — regenerates deterministically from a fixed seed
+data/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+.DS_Store
+.idea/
+.vscode/

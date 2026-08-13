@@ -1,0 +1,231 @@
+"""Normalise messy exports into reconciliation cases.
+
+Every field arriving from a real POS or supplier system is untrusted:
+SKU spellings drift, dates come in three formats, quantities arrive as
+floats or padded strings, and a bad export duplicates rows outright.
+
+This module is deliberately strict. Anything it cannot parse is rejected
+into a quarantine list rather than silently coerced — a row guessed wrong
+here becomes a phantom discrepancy three layers up, and the agent then
+spends tokens explaining a bug.
+"""
+
+from __future__ import annotations
+
+import csv
+import re
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+from .models import CATALOGUE_INDEX, ReconciliationCase
+
+DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%b-%Y", "%d/%m/%y")
+SKU_PATTERN = re.compile(r"^0?([A-Z]{3})[\s-]?(\d{4})$")
+
+
+@dataclass
+class Rejection:
+    source: str
+    row: dict
+    reason: str
+
+
+@dataclass
+class IngestResult:
+    cases: list[ReconciliationCase] = field(default_factory=list)
+    rejections: list[Rejection] = field(default_factory=list)
+    duplicates_dropped: int = 0
+
+    @property
+    def rejection_rate(self) -> float:
+        total = len(self.cases) + len(self.rejections)
+        return len(self.rejections) / total if total else 0.0
+
+
+# ----------------------------------------------------------------------
+# Field-level normalisation
+# ----------------------------------------------------------------------
+
+def normalise_sku(raw: str) -> str:
+    """Fold every observed spelling back to canonical AAA-0000 form.
+
+    Raises ValueError rather than guessing — an unrecognised SKU that gets
+    mapped to a neighbour silently corrupts two cases, not one.
+    """
+    if raw is None:
+        raise ValueError("missing sku")
+    candidate = raw.strip().upper().replace("_", "-")
+    m = SKU_PATTERN.match(candidate)
+    if not m:
+        raise ValueError(f"unrecognised sku format: {raw!r}")
+    canonical = f"{m.group(1)}-{m.group(2)}"
+    if canonical not in CATALOGUE_INDEX:
+        raise ValueError(f"sku not in catalogue: {canonical}")
+    return canonical
+
+
+def normalise_date(raw: str) -> date:
+    if raw is None or not raw.strip():
+        raise ValueError("missing date")
+    text = raw.strip()
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"unparseable date: {raw!r}")
+
+
+def normalise_qty(raw: str) -> int:
+    """Accept '12', '12.0', ' 12 '. Reject '12.4' — a fractional unit count
+    means the upstream export is wrong and should be seen, not rounded."""
+    if raw is None or not str(raw).strip():
+        raise ValueError("missing quantity")
+    text = str(raw).strip()
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"non-numeric quantity: {raw!r}") from None
+    if abs(value - round(value)) > 1e-9:
+        raise ValueError(f"fractional unit quantity: {raw!r}")
+    return int(round(value))
+
+
+def normalise_uom(raw: str | None) -> str:
+    """Blank unit-of-measure is the norm, not an error — most systems omit
+    it and mean eaches. CASE is the meaningful signal."""
+    text = (raw or "").strip().upper()
+    if text in {"CASE", "CTN", "CS"}:
+        return "CASE"
+    return "EACH"
+
+
+# ----------------------------------------------------------------------
+# File loading
+# ----------------------------------------------------------------------
+
+def _read(path: Path) -> list[dict]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+def load_pos(path: Path, result: IngestResult) -> list[dict]:
+    """Sales, deduplicated by transaction id.
+
+    Note the distinction that matters: an identical transaction_id appearing
+    twice is an export artifact and is dropped. A genuine till double-scan
+    produces a *separate* transaction id and is kept — that is a real
+    discrepancy the system is supposed to catch, not noise to clean away.
+    """
+    rows, seen = [], set()
+    for raw in _read(path):
+        tid = (raw.get("transaction_id") or "").strip()
+        if tid and tid in seen:
+            result.duplicates_dropped += 1
+            continue
+        seen.add(tid)
+        try:
+            rows.append({
+                "transaction_id": tid,
+                "sale_date": normalise_date(raw["sale_date"]),
+                "sku_id": normalise_sku(raw["sku"]),
+                "qty": normalise_qty(raw["qty"]),
+            })
+        except (ValueError, KeyError) as exc:
+            result.rejections.append(Rejection("pos_sales", raw, str(exc)))
+    return rows
+
+
+def load_deliveries(path: Path, result: IngestResult) -> list[dict]:
+    rows = []
+    for raw in _read(path):
+        try:
+            sku_id = normalise_sku(raw["sku"])
+            rows.append({
+                "docket_no": (raw.get("docket_no") or "").strip(),
+                "delivery_date": normalise_date(raw["delivery_date"]),
+                "supplier": (raw.get("supplier") or "").strip().title(),
+                "sku_id": sku_id,
+                "qty_received": normalise_qty(raw["qty_received"]),
+                "uom": normalise_uom(raw.get("uom")),
+            })
+        except (ValueError, KeyError) as exc:
+            result.rejections.append(Rejection("deliveries", raw, str(exc)))
+    return rows
+
+
+def load_counts(path: Path, result: IngestResult) -> list[dict]:
+    rows = []
+    for raw in _read(path):
+        try:
+            rows.append({
+                "count_id": (raw.get("count_id") or "").strip(),
+                "count_date": normalise_date(raw["count_date"]),
+                "sku_id": normalise_sku(raw["sku"]),
+                "opening_qty": normalise_qty(raw["opening_qty"]),
+                "closing_qty": normalise_qty(raw["closing_qty"]),
+            })
+        except (ValueError, KeyError) as exc:
+            result.rejections.append(Rejection("stock_counts", raw, str(exc)))
+    return rows
+
+
+# ----------------------------------------------------------------------
+# Assembly
+# ----------------------------------------------------------------------
+
+def build_cases(raw_dir: Path) -> IngestResult:
+    """Assemble one ReconciliationCase per stocktake row.
+
+    Deliveries and sales are attributed to the period whose window contains
+    their recorded date. That is intentionally literal: a delivery whose
+    paperwork is dated after the count belongs to the next period, which is
+    exactly how a late-delivery discrepancy comes into existence. Fixing it
+    here would hide the very thing the system exists to find.
+    """
+    result = IngestResult()
+
+    pos = load_pos(raw_dir / "pos_sales.csv", result)
+    deliveries = load_deliveries(raw_dir / "deliveries.csv", result)
+    counts = load_counts(raw_dir / "stock_counts.csv", result)
+
+    for c in sorted(counts, key=lambda r: (r["sku_id"], r["count_date"])):
+        period_end = c["count_date"]
+        period_start = period_end - timedelta(days=6)
+        sku_id = c["sku_id"]
+
+        sold = sum(
+            p["qty"] for p in pos
+            if p["sku_id"] == sku_id and period_start <= p["sale_date"] <= period_end
+        )
+        delivered = sum(
+            d["qty_received"] for d in deliveries
+            if d["sku_id"] == sku_id
+            and period_start <= d["delivery_date"] <= period_end
+        )
+
+        result.cases.append(ReconciliationCase(
+            case_id=c["count_id"],
+            sku_id=sku_id,
+            period_start=period_start,
+            period_end=period_end,
+            opening_count=c["opening_qty"],
+            closing_count=c["closing_qty"],
+            delivered_units=delivered,
+            sold_units=sold,
+        ))
+
+    return result
+
+
+if __name__ == "__main__":
+    root = Path(__file__).resolve().parents[2]
+    res = build_cases(root / "data" / "raw")
+    flagged = [c for c in res.cases if c.discrepancy != 0]
+    print(f"cases assembled     : {len(res.cases)}")
+    print(f"duplicate rows dropped: {res.duplicates_dropped}")
+    print(f"rejected rows       : {len(res.rejections)}")
+    print(f"cases with a discrepancy: {len(flagged)}")
+    for r in res.rejections[:5]:
+        print(f"  rejected [{r.source}] {r.reason}")
