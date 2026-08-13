@@ -35,6 +35,64 @@ START = date(2026, 6, 1)  # a Monday
 # would then be measured against a world that does not exist.
 GRN_COVERAGE = 0.7
 
+# Share of judgement-cause weeks where someone wrote a note about it. Staff
+# notice most of what goes wrong and record about half of it.
+NOTE_COVERAGE = 0.55
+
+STAFF = ("J. Ruka", "priya s", "M Tanner", "Dave", "aroha", "S. Whitcombe")
+
+# Notes are written the way people write them: no fixed vocabulary, the cause
+# often implied rather than named. "Third week running the facing is short"
+# says theft without using the word, and "wouldn't keep till Monday" says
+# spoilage without saying expired. A keyword matcher can catch the blunt ones;
+# the oblique ones are the point of having a reader at all.
+NOTE_TEMPLATES: dict[Cause, tuple[str, ...]] = {
+    Cause.UNLOGGED_WASTAGE: (
+        "binned {n} {item}, past date",
+        "chucked a tray of {item}, had turned",
+        "{item} in the back was sweating, pulled it off the shelf",
+        "had to pull {n} {item} — wouldn't keep till Monday",
+        "chiller door left open overnight, {item} not right after",
+        "dumped some {item}, smelled off",
+        "{n} {item} damaged in the crate, not sellable",
+    ),
+    Cause.SHRINKAGE: (
+        "{item} facing looks light again",
+        "third week running we're down on {item}",
+        "someone's helping themselves to the {item}",
+        "{item} shelf keeps emptying faster than it sells",
+        "front of shop {item} gone again, nothing rung up",
+        "asked the team about the {item}, nobody knows",
+        "{item} walking out the door, need to move it behind the counter",
+    ),
+    Cause.MISCOUNT: (
+        "recount of {item} didn't match the first pass",
+        "counted the {item} twice, got two numbers",
+        "priya and I disagreed on the {item} count",
+        "not confident on the {item} tally, was rushing",
+        "{item} count done late, might be out",
+        "lost my place counting the {item}",
+    ),
+    Cause.SHORT_DELIVERY: (
+        "driver was light on the {item}, said Monday",
+        "{item} order came up short, no paperwork for it",
+        "checked the {item} off the truck, less than the docket",
+        "short on {item} again from this supplier",
+    ),
+}
+
+# Notes about anything else. Staff write about the whole shop, so a note
+# existing is not evidence on its own.
+NOISE_NOTES = (
+    "cleaned down the chiller",
+    "new planogram for the drinks bay",
+    "price ticket wrong on {item}, fixed",
+    "trolley wheel broken, put it out back",
+    "{item} promo ends Sunday",
+    "eftpos terminal slow all morning",
+    "shelf edge labels reprinted for aisle 3",
+)
+
 
 # How often each cause is planted. NONE dominates because most weeks in a
 # real store reconcile cleanly, and an eval set where every case is broken
@@ -139,6 +197,9 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
     # noticing. Recall on short_delivery is bounded by this rate, which
     # makes it exactly the wrong quantity to leave resting on coincidence.
     grn_rng = random.Random(seed ^ 0x9E3779B9)
+    # Whether anyone wrote a note is its own stream too, for the same reason
+    # GRN coverage is: note coverage must not depend on what went wrong.
+    note_rng = random.Random(seed ^ 0x85EBCA6B)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Transaction ids must be unique by construction. Drawn independently they
@@ -158,6 +219,7 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
     pos_rows: list[dict] = []
     delivery_rows: list[dict] = []
     grn_rows: list[dict] = []
+    note_rows: list[dict] = []
     count_rows: list[dict] = []
     labels: list[Label] = []
 
@@ -370,12 +432,39 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
                 "counted_by": rng.choice(["J. Ruka", "priya s", "M Tanner", ""]),
             })
 
+            # --- emit a staff note -----------------------------------------
+            # Written by whoever was on that day, about the SKU, inside the
+            # period. It records what a person noticed, which is not always
+            # what the arithmetic shows.
+            item = sku.description.split(" ")[0].lower()
+            if (cause in NOTE_TEMPLATES
+                    and note_rng.random() < NOTE_COVERAGE):
+                template = note_rng.choice(NOTE_TEMPLATES[cause])
+                note_rows.append({
+                    "note_id": f"N{note_rng.randint(10**5, 10**6 - 1)}",
+                    "note_date": messy_date(
+                        p_start + timedelta(days=note_rng.randint(0, 6)), note_rng),
+                    "sku": messy_sku(sku.sku_id, note_rng),
+                    "author": note_rng.choice(STAFF),
+                    "text": template.format(n=abs(magnitude) or 1, item=item),
+                })
+            elif note_rng.random() < 0.06:
+                note_rows.append({
+                    "note_id": f"N{note_rng.randint(10**5, 10**6 - 1)}",
+                    "note_date": messy_date(
+                        p_start + timedelta(days=note_rng.randint(0, 6)), note_rng),
+                    "sku": messy_sku(sku.sku_id, note_rng),
+                    "author": note_rng.choice(STAFF),
+                    "text": note_rng.choice(NOISE_NOTES).format(item=item),
+                })
+
             labels.append(Label(case_id, cause, magnitude, note))
             on_hand[sku.sku_id] = closing
 
     _write(out_dir / "pos_sales.csv", pos_rows)
     _write(out_dir / "deliveries.csv", delivery_rows)
     _write(out_dir / "goods_received.csv", grn_rows)
+    _write(out_dir / "staff_notes.csv", note_rows)
     _write(out_dir / "stock_counts.csv", count_rows)
     _write(
         out_dir / "labels.csv",
@@ -394,6 +483,7 @@ def generate(out_dir: Path, seed: int = SEED) -> dict[str, int]:
         "pos_rows": len(pos_rows),
         "delivery_rows": len(delivery_rows),
         "grn_rows": len(grn_rows),
+        "note_rows": len(note_rows),
         "count_rows": len(count_rows),
         "cases": len(labels),
     }

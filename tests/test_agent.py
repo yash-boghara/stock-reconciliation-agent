@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from src.recon.agent import (
     JUDGEMENT_CAUSES,
     CaseFile,
+    HeuristicClient,
     build_brief,
     classify_residue,
     classify_with_model,
@@ -142,7 +143,62 @@ class TestHeuristicControl(unittest.TestCase):
     def test_control_accuracy_holds(self):
         correct = sum(1 for cid, v in self.verdicts.items()
                       if v.cause.value == self.labels[cid])
-        self.assertEqual(correct, 24, "control moved; record the new figure")
+        self.assertEqual(correct, 30, "control moved; record the new figure")
+
+
+class TestStaffNotes(unittest.TestCase):
+    """Free-text notes are the evidence the numbers cannot carry."""
+
+    def setUp(self):
+        self.result, self.findings = pipeline(DATA)
+        self.casefile = CaseFile(self.result, self.findings)
+        self.control = HeuristicClient(self.casefile)
+
+    def test_notes_reach_the_agent_verbatim(self):
+        """Every other field is normalised hard; note text must not be. The
+        signal lives in exactly how it was written."""
+        texts = []
+        for case in self.result.cases:
+            texts += [n["text"] for n in
+                      self.casefile.get_staff_notes(case.case_id)["notes"]]
+        self.assertGreater(len(texts), 0)
+        for text in texts:
+            self.assertEqual(text, text.strip())
+            self.assertNotEqual(text, text.upper())
+
+    def test_a_case_with_no_note_returns_empty_not_an_error(self):
+        quiet = [
+            c for c in self.result.cases
+            if not self.casefile.get_staff_notes(c.case_id)["notes"]
+        ]
+        self.assertGreater(len(quiet), 0)
+        self.assertEqual(self.casefile.get_staff_notes(quiet[0].case_id),
+                         {"notes": []})
+
+    def test_keyword_matches_are_never_wrong(self):
+        """The keyword list is the cheap baseline. It is allowed to miss;
+        it is not allowed to misread, or it stops being a fair bar."""
+        labels = load_labels(DATA)
+        for case in residue_cases(self.result, self.findings):
+            match = self.control._match_notes(case)
+            if match is not None:
+                self.assertEqual(match[0].value, labels[case.case_id],
+                                 f"{case.case_id}: keyword matched the wrong cause")
+
+    def test_oblique_phrasings_defeat_the_keyword_list(self):
+        """The model's entire headroom is here. If a keyword list could read
+        these, there would be nothing for a reader to add."""
+        oblique = [
+            "had to pull 4 yoghurt — wouldn't keep till Monday",
+            "third week running we're down on cigarettes",
+            "chiller door left open overnight, milk not right after",
+            "lost my place counting the rice",
+            "rice count done late, might be out",
+        ]
+        for text in oblique:
+            hit = any(phrase in text.lower()
+                      for phrase, _ in HeuristicClient.KEYWORDS)
+            self.assertFalse(hit, f"keyword list unexpectedly reads: {text!r}")
 
 
 class StubResponse(SimpleNamespace):

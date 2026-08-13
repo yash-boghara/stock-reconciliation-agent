@@ -51,6 +51,7 @@ class CaseEvidence:
     deliveries: list[dict] = field(default_factory=list)
     late_deliveries: list[dict] = field(default_factory=list)
     goods_received: dict[str, dict] = field(default_factory=dict)  # by docket_no
+    notes: list[dict] = field(default_factory=list)  # free-text, written by staff
 
 
 @dataclass
@@ -228,6 +229,34 @@ def load_goods_received(path: Path, result: IngestResult) -> list[dict]:
     return rows
 
 
+def load_notes(path: Path, result: IngestResult) -> list[dict]:
+    """Free-text notes staff wrote against a SKU.
+
+    The text is passed through untouched. Everything else in this module
+    normalises aggressively, but a note's value is in exactly how it was
+    written — "wouldn't keep till Monday" and "past date" mean the same
+    thing, and any normalisation that flattened them would destroy the
+    signal it was trying to clean.
+
+    A missing file is not an error; plenty of stores keep no notes at all.
+    """
+    if not path.exists():
+        return []
+    rows = []
+    for raw in _read(path):
+        try:
+            rows.append({
+                "note_id": (raw.get("note_id") or "").strip(),
+                "note_date": normalise_date(raw["note_date"]),
+                "sku_id": normalise_sku(raw["sku"]),
+                "author": (raw.get("author") or "").strip(),
+                "text": (raw.get("text") or "").strip(),
+            })
+        except (ValueError, KeyError) as exc:
+            result.rejections.append(Rejection("staff_notes", raw, str(exc)))
+    return rows
+
+
 def load_counts(path: Path, result: IngestResult) -> list[dict]:
     rows = []
     for raw in _read(path):
@@ -262,6 +291,7 @@ def build_cases(raw_dir: Path) -> IngestResult:
     pos = load_pos(raw_dir / "pos_sales.csv", result)
     deliveries = load_deliveries(raw_dir / "deliveries.csv", result)
     grns = load_goods_received(raw_dir / "goods_received.csv", result)
+    notes = load_notes(raw_dir / "staff_notes.csv", result)
     counts = load_counts(raw_dir / "stock_counts.csv", result)
 
     grn_by_docket = {g["docket_no"]: g for g in grns if g["docket_no"]}
@@ -274,6 +304,9 @@ def build_cases(raw_dir: Path) -> IngestResult:
     deliveries_by_sku: dict[str, list[dict]] = {}
     for d in deliveries:
         deliveries_by_sku.setdefault(d["sku_id"], []).append(d)
+    notes_by_sku: dict[str, list[dict]] = {}
+    for n in notes:
+        notes_by_sku.setdefault(n["sku_id"], []).append(n)
 
     for c in sorted(counts, key=lambda r: (r["sku_id"], r["count_date"])):
         period_end = c["count_date"]
@@ -294,6 +327,10 @@ def build_cases(raw_dir: Path) -> IngestResult:
             grn = grn_by_docket.get(d["docket_no"])
             if grn is not None:
                 evidence.goods_received[d["docket_no"]] = grn
+
+        for n in notes_by_sku.get(sku_id, ()):
+            if period_start <= n["note_date"] <= period_end:
+                evidence.notes.append(n)
 
         result.cases.append(ReconciliationCase(
             case_id=c["count_id"],

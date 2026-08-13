@@ -72,9 +72,13 @@ across runs are comparable.
 Current dataset: 150 cases over 6 weeks and 25 SKUs — 71 clean, 79 with a
 planted cause.
 
-Six columns of the POS export matter beyond the obvious: `till` and
+Two columns of the POS export matter beyond the obvious: `till` and
 `sale_time` are what separate a genuine re-ring from two customers buying the
-same thing on the same day. Five documents are emitted. `goods_received.csv` is the one that carries
+same thing on the same day.
+
+Six documents are emitted. `staff_notes.csv` is free text — what someone
+wrote down about a SKU that week, deliberately unnormalised, covering 55% of
+the weeks where something went wrong. `goods_received.csv` is the one that carries
 weight: it records what was counted off the truck, and it exists for only
 70% of deliveries. That figure is deliberate. A GRN is the only document
 that can prove a short delivery, and receiving paperwork is the first thing
@@ -187,33 +191,49 @@ available feature:
 | Classifier over the residue | Accuracy |
 |---|---|
 | Majority class (always guess the mode) | 41.5% |
-| Bayes-optimal ceiling, all features | ~78% |
-| **Heuristic control — no model, ~20 lines** | **75.0%** |
+| Structured features only, Bayes-optimal | ~78% |
+| Heuristic control, structure only | 75.0% |
+| **Heuristic control + keyword-matched notes** | **84.2%** |
+| **Ceiling if the notes were read properly** | **89.8%** |
 
 Measured over 1798 residue cases across 40 seeds. End-to-end, rules plus the
-control reconcile **92.5%** of all cases (min 88.0%, max 96.0%).
+control reconcile **95.3%** of all cases (min 92.0%, max 98.0%).
 
-**The control lands within 3 points of the ceiling.** The context that
-separates these causes — is the line short-dated, is it theft-prone, has it
-lost stock in other weeks — is structured, and structured context is what
-code is good at. On this data an LLM has at most three points of headroom,
-which does not pay for a model call per case.
+The first measurement said don't build it. On structured features alone the
+control reached 75.0% against a 78% ceiling — three points of headroom, which
+does not pay for a model call per case. That context is *structured*, and
+structured context is what code is good at.
 
-That is a finding, not a failure, and it is the one the project was built to
-produce: *measure the cheap layer before assuming the expensive one is
-needed*. The agent is implemented and correct — schema-validated tools,
-prompt caching, structured verdicts, token accounting — and it stays off by
-default:
+So the evidence changed rather than the prompt. Staff notes are the only
+thing in this dataset that records what a person actually saw, and they are
+written the way people write: `binned 5 butter, past date`, but also
+`had to pull 4 yoghurt — wouldn't keep till Monday` and `third week running
+we're down on paper`.
+
+**A keyword list reads 57.8% of the notes and never misreads one.** The other
+**438 — 24.4% of the whole residue — are phrased too obliquely for any word
+list**, and that is precisely the 5.6 points between the control and the
+ceiling. Recognising that *wouldn't keep till Monday* means spoilage, and
+that *third week running* means recurrence, is the thing a language model
+does and a regex cannot.
+
+That is a quantified case for a model rather than an assumed one — and it is
+5.6 points on the residue, which is about 1.3 points end-to-end. Whether that
+pays is a cost decision, and it tilts sharply as the free-text share grows:
+a real store's evidence is far more note and far less spreadsheet.
+
+The agent is implemented and correct — three schema-validated tools, prompt
+caching on the shared prefix, structured verdicts, per-case token accounting
+— and stays off by default:
 
 ```bash
-python3 -m src.recon.agent                  # heuristic control (free, offline)
-RECON_USE_MODEL=1 python3 -m src.recon.agent # same harness, via Claude
+python3 -m src.recon.agent                   # heuristic control (free, offline)
+RECON_USE_MODEL=1 python3 -m src.recon.agent  # same harness, via Claude
 ```
 
-Where a model would earn its place is evidence code cannot parse: supplier
-emails disputing a delivery, a staff note reading *"dropped a tray of eggs
-Thursday"*, a handwritten wastage book. That is the next thing worth
-building — not a better prompt over the same four numbers.
+The control is not a mock. It answers the same tool calls against the same
+evidence, so CI exercises the whole harness on every push without an API key,
+and the number it produces is the bar the model has to clear.
 
 ### An earlier version of this residue was unmeasurable
 
@@ -242,18 +262,20 @@ Built:
 - Ingestion and normalisation layer with quarantine
 - Deterministic rules layer, with pair rules spanning adjacent periods
 - Evaluation harness reporting per-cause precision and recall
-- Agent layer over the residue: two schema-validated retrieval tools, prompt
-  caching, structured verdicts, token accounting, and a no-model control
-  that doubles as the offline test double
-- 45 tests: dataset integrity, generator invariants, per-rule declining
+- Free-text staff notes, and the measurement showing they are where a reader
+  earns its place
+- Agent layer over the residue: three schema-validated retrieval tools,
+  prompt caching, structured verdicts, token accounting, and a no-model
+  control that doubles as the offline test double
+- 49 tests: dataset integrity, generator invariants, per-rule declining
   cases, a multi-seed precision check, a label-leakage guard, and pinned
   baselines for both layers
 - CI running the whole pipeline on every push
 
 Next:
 
-- Free-text evidence (delivery notes, staff wastage notes) — the point at
-  which a model does something code cannot
+- Run the model path against the control and record the delta (needs an API
+  key; the harness and the bar are both in place)
 - Retrieval over resolved historical cases (pgvector)
 - Postgres persistence, containerised API, review interface, cost tracking
 - Retrieval over resolved historical cases (pgvector)

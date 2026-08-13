@@ -98,6 +98,29 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "get_staff_notes",
+        "description": (
+            "Free-text notes staff wrote against this SKU during the period. "
+            "This is the only evidence that records what a person actually "
+            "saw, and it frequently names the cause outright — or implies it. "
+            "Read it before deciding: a note saying stock was binned past its "
+            "date settles a case that the numbers alone cannot. Returns an "
+            "empty list when nobody wrote anything, which is common and is "
+            "not itself evidence of anything."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "case_id": {
+                    "type": "string",
+                    "description": "The case under review, e.g. 'CHL-4002-W03'.",
+                },
+            },
+            "required": ["case_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "get_sku_history",
         "description": (
             "Every other week for this SKU: the discrepancy observed and what "
@@ -181,6 +204,20 @@ class CaseFile:
             "short_dated": sku.perishable,
         }
 
+    def get_staff_notes(self, case_id: str) -> dict:
+        evidence = self.result.evidence.get(case_id)
+        notes = evidence.notes if evidence else []
+        return {
+            "notes": [
+                {
+                    "date": n["note_date"].isoformat(),
+                    "author": n["author"],
+                    "text": n["text"],
+                }
+                for n in notes
+            ],
+        }
+
     def get_sku_history(self, sku_id: str, exclude_case_id: str = "") -> dict:
         weeks = []
         for case in self._by_sku.get(sku_id, ()):
@@ -210,6 +247,8 @@ class CaseFile:
     def dispatch(self, name: str, args: dict, case_id: str) -> dict:
         if name == "get_sku_profile":
             return self.get_sku_profile(args.get("sku_id", ""))
+        if name == "get_staff_notes":
+            return self.get_staff_notes(case_id)
         if name == "get_sku_history":
             return self.get_sku_history(args.get("sku_id", ""), case_id)
         return {"error": f"unknown tool: {name}"}
@@ -229,7 +268,8 @@ def build_brief(case: ReconciliationCase, casefile: CaseFile) -> str:
         f"Sold (recorded): {case.sold_units}\n"
         f"Expected close: {case.expected_closing}\n"
         f"Actual close: {case.closing_count}\n"
-        f"Discrepancy: {case.discrepancy}\n\n"
+        f"Discrepancy: {case.discrepancy}\n"
+        f"Staff notes on file for this SKU this period: {len(evidence.notes) if evidence else 0}\n\n"
         "Name the cause."
     )
 
@@ -260,6 +300,11 @@ class HeuristicClient:
         profile = self.casefile.get_sku_profile(case.sku_id)
         history = self.casefile.get_sku_history(case.sku_id, case.case_id)
 
+        matched = self._match_notes(case)
+        if matched is not None:
+            cause, quote = matched
+            return (cause, "high", f'Staff note: "{quote}"')
+
         if case.discrepancy > 0:
             return (Cause.MISCOUNT, "high",
                     "Positive discrepancy; only a miscount overstates a close "
@@ -280,6 +325,39 @@ class HeuristicClient:
         return (Cause.MISCOUNT, "low",
                 "Small shortfall on a line with no spoilage or theft profile "
                 "and no recurring pattern.")
+
+
+    # Keyword matching over the notes — the cheap way to read free text, and
+    # therefore the bar a model has to clear rather than a straw man. It
+    # catches the blunt phrasings and misses the oblique ones, which is
+    # exactly the property worth measuring.
+    KEYWORDS: tuple[tuple[str, Cause], ...] = (
+        ("past date", Cause.UNLOGGED_WASTAGE),
+        ("binned", Cause.UNLOGGED_WASTAGE),
+        ("chucked", Cause.UNLOGGED_WASTAGE),
+        ("dumped", Cause.UNLOGGED_WASTAGE),
+        ("smelled off", Cause.UNLOGGED_WASTAGE),
+        ("damaged", Cause.UNLOGGED_WASTAGE),
+        ("helping themselves", Cause.SHRINKAGE),
+        ("walking out", Cause.SHRINKAGE),
+        ("nothing rung up", Cause.SHRINKAGE),
+        ("looks light", Cause.SHRINKAGE),
+        ("recount", Cause.MISCOUNT),
+        ("counted the", Cause.MISCOUNT),
+        ("disagreed", Cause.MISCOUNT),
+        ("tally", Cause.MISCOUNT),
+        ("short, no paperwork", Cause.SHORT_DELIVERY),
+        ("less than the docket", Cause.SHORT_DELIVERY),
+        ("driver was light", Cause.SHORT_DELIVERY),
+    )
+
+    def _match_notes(self, case: ReconciliationCase):
+        for note in self.casefile.get_staff_notes(case.case_id)["notes"]:
+            text = note["text"].lower()
+            for phrase, cause in self.KEYWORDS:
+                if phrase in text:
+                    return cause, note["text"]
+        return None
 
 
 def classify_with_heuristic(
