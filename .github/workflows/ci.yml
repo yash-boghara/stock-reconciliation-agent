@@ -31,3 +31,10 @@ jobs:
         run: |
           python -m src.recon.generate
           python -m src.recon.evaluate
+
+      # Rebuild the committed sample queue and fail if it drifted. A sample
+      # output that no longer matches the code is worse than none at all.
+      - name: Check the committed review queue is current
+        run: |
+          python -m src.recon.correct
+          git diff --exit-code docs/sample-review-queue.md
