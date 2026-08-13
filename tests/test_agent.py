@@ -35,6 +35,16 @@ from src.recon.rules import classify
 DATA = Path(__file__).resolve().parents[1] / "data" / "raw"
 
 
+def setUpModule():
+    """Generate the dataset this module reads.
+
+    `data/` is not committed — it regenerates from a fixed seed. Relying on
+    another test module to have produced it first passes locally, where the
+    directory is usually already there, and fails on a clean checkout.
+    """
+    generate(DATA)
+
+
 def pipeline(raw: Path):
     result = build_cases(raw)
     findings = classify(result)
