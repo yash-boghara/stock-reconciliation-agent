@@ -229,7 +229,15 @@ caching on the shared prefix, structured verdicts, per-case token accounting
 ```bash
 python3 -m src.recon.agent                   # heuristic control (free, offline)
 RECON_USE_MODEL=1 python3 -m src.recon.agent  # same harness, via Claude
+
+# Only the cases whose notes defeat a keyword list — a quarter of the calls,
+# and the only cases where the two can disagree on evidence rather than luck.
+RECON_ONLY_CONTESTED=1 RECON_USE_MODEL=1 python3 -m src.recon.agent
 ```
+
+Both paths print every case against the control and the truth, and write the
+full record to `data/agent_verdicts.json`. A run that reports a summary and
+five example rows makes the next question cost another run.
 
 The control is not a mock. It answers the same tool calls against the same
 evidence, so CI exercises the whole harness on every push without an API key,

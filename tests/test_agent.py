@@ -22,6 +22,7 @@ from src.recon.agent import (
     JUDGEMENT_CAUSES,
     _explain,
     CaseFile,
+    contested_cases,
     HeuristicClient,
     build_brief,
     classify_residue,
@@ -200,6 +201,37 @@ class TestStaffNotes(unittest.TestCase):
             hit = any(phrase in text.lower()
                       for phrase, _ in HeuristicClient.KEYWORDS)
             self.assertFalse(hit, f"keyword list unexpectedly reads: {text!r}")
+
+
+class TestContestedSubset(unittest.TestCase):
+    """The only cases where a model and the control read different evidence.
+
+    Everywhere else both see a case with no note, or a note the keyword list
+    already reads correctly — so paying a model to re-derive the control's
+    answer there measures nothing but spend.
+    """
+
+    def setUp(self):
+        self.result, self.findings = pipeline(DATA)
+        self.casefile = CaseFile(self.result, self.findings)
+        self.control = HeuristicClient(self.casefile)
+
+    def test_every_contested_case_has_a_note_the_keywords_cannot_read(self):
+        contested = contested_cases(self.result, self.findings)
+        self.assertGreater(len(contested), 0)
+        for case in contested:
+            self.assertTrue(self.casefile.get_staff_notes(case.case_id)["notes"])
+            self.assertIsNone(self.control._match_notes(case))
+
+    def test_contested_is_a_strict_subset_of_the_residue(self):
+        residue = {c.case_id for c in residue_cases(self.result, self.findings)}
+        contested = {c.case_id for c in contested_cases(self.result, self.findings)}
+        self.assertLess(contested, residue)
+
+    def test_running_a_subset_scores_only_that_subset(self):
+        contested = contested_cases(self.result, self.findings)
+        verdicts = classify_residue(self.result, self.findings, cases=contested)
+        self.assertEqual(set(verdicts), {c.case_id for c in contested})
 
 
 class TestFailureMessages(unittest.TestCase):

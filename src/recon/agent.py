@@ -492,17 +492,36 @@ def residue_cases(result: IngestResult, findings: dict[str, Finding]) -> list:
     return [c for c in result.cases if not findings[c.case_id].resolved]
 
 
+def contested_cases(result: IngestResult, findings: dict[str, Finding]) -> list:
+    """Residue cases carrying a note no keyword list can read.
+
+    This is the only population where a model and the control can disagree
+    on evidence rather than luck. Everywhere else they see identical facts:
+    a case with no note, or one whose note the keyword matcher already
+    reads correctly. Measuring here costs a quarter of a full run and
+    carries all of the signal.
+    """
+    casefile = CaseFile(result, findings)
+    control = HeuristicClient(casefile)
+    return [
+        case for case in residue_cases(result, findings)
+        if casefile.get_staff_notes(case.case_id)["notes"]
+        and control._match_notes(case) is None
+    ]
+
+
 def classify_residue(
     result: IngestResult,
     findings: dict[str, Finding],
     *,
     client: Any | None = None,
     effort: str = "medium",
+    cases: list | None = None,
 ) -> dict[str, Verdict]:
     """Verdicts for every residue case. No client means the heuristic control."""
     casefile = CaseFile(result, findings)
     verdicts: dict[str, Verdict] = {}
-    for case in residue_cases(result, findings):
+    for case in (residue_cases(result, findings) if cases is None else cases):
         verdicts[case.case_id] = (
             classify_with_heuristic(case, casefile)
             if client is None
@@ -518,7 +537,8 @@ if __name__ == "__main__":
     from .ingest import build_cases
     from .rules import classify
 
-    raw = Path(__file__).resolve().parents[2] / "data" / "raw"
+    root = Path(__file__).resolve().parents[2]
+    raw = root / "data" / "raw"
     result = build_cases(raw)
     findings = classify(result)
     labels = load_labels(raw)
@@ -530,8 +550,14 @@ if __name__ == "__main__":
 
         client = sdk.Anthropic()
 
+    # Only the cases whose notes defeat a keyword list can separate the two.
+    # Everywhere else they read identical evidence, so paying a model to
+    # re-derive the control's answer measures nothing.
+    subset = (contested_cases(result, findings)
+              if os.environ.get("RECON_ONLY_CONTESTED") else None)
+
     try:
-        verdicts = classify_residue(result, findings, client=client)
+        verdicts = classify_residue(result, findings, client=client, cases=subset)
     except Exception as exc:  # noqa: BLE001 — re-raised below unless recognised
         hint = _explain(exc, sdk)
         if hint is None:
@@ -541,11 +567,58 @@ if __name__ == "__main__":
         print("number the model has to beat anyway:\n")
         print("    python3 -m src.recon.agent\n")
         raise SystemExit(1)
-    correct = sum(1 for cid, v in verdicts.items() if v.cause.value == labels[cid])
+
+    control = classify_residue(result, findings, cases=subset)
     label = "claude" if client else "heuristic control"
-    print(f"residue cases : {len(verdicts)}")
+
+    correct = sum(1 for cid, v in verdicts.items() if v.cause.value == labels[cid])
+    ctrl_correct = sum(1 for cid, v in control.items() if v.cause.value == labels[cid])
+
+    scope = "contested cases only" if subset is not None else "full residue"
+    print(f"scope         : {scope}")
+    print(f"cases         : {len(verdicts)}")
     print(f"classifier    : {label}")
     print(f"correct       : {correct}/{len(verdicts)} ({correct / len(verdicts):.1%})")
-    for cid, v in sorted(verdicts.items())[:5]:
-        mark = "ok " if v.cause.value == labels[cid] else "MISS"
-        print(f"  [{mark}] {cid}: {v.cause.value} ({v.confidence}) — {v.rationale}")
+    if client is not None:
+        print(f"control       : {ctrl_correct}/{len(control)} "
+              f"({ctrl_correct / len(control):.1%})")
+        tokens = sum(v.input_tokens for v in verdicts.values())
+        cached = sum(v.cached_tokens for v in verdicts.values())
+        out = sum(v.output_tokens for v in verdicts.values())
+        print(f"tokens        : {tokens:,} in ({cached:,} cached), {out:,} out")
+
+    # Every case, every time. A run that prints five rows makes the next
+    # question cost another run.
+    print()
+    print(f"{'case':<17}{'truth':<18}{'model':<18}{'control':<18}")
+    print("-" * 71)
+    for cid in sorted(verdicts):
+        v, c = verdicts[cid], control[cid]
+        flag = "" if v.cause.value == labels[cid] else "  <- miss"
+        if v.cause is not c.cause:
+            flag += "  [differs from control]"
+        print(f"{cid:<17}{labels[cid]:<18}{v.cause.value:<18}{c.cause.value:<18}{flag}")
+
+    out_path = root / "data" / "agent_verdicts.json"
+    out_path.write_text(json.dumps({
+        "scope": scope,
+        "classifier": label,
+        "correct": correct,
+        "total": len(verdicts),
+        "control_correct": ctrl_correct,
+        "cases": {
+            cid: {
+                "truth": labels[cid],
+                "model": v.cause.value,
+                "control": control[cid].cause.value,
+                "confidence": v.confidence,
+                "rationale": v.rationale,
+                "tool_calls": v.tool_calls,
+                "input_tokens": v.input_tokens,
+                "cached_tokens": v.cached_tokens,
+                "output_tokens": v.output_tokens,
+            }
+            for cid, v in sorted(verdicts.items())
+        },
+    }, indent=2))
+    print(f"\nfull record written to {out_path.relative_to(root)}")
