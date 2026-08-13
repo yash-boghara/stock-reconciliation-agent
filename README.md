@@ -292,4 +292,17 @@ python3 -m src.recon.agent             # classifies the residue (control)
 python3 -m unittest discover -s tests -t .
 ```
 
-No third-party dependencies yet; standard library only.
+Standard library only — generator, ingestion, rules, evaluation, the
+heuristic control, and all 49 tests. That is what keeps CI free and offline.
+
+The agent's model path is the one exception:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-agent.txt
+export ANTHROPIC_API_KEY=sk-ant-...        # from console.anthropic.com
+RECON_USE_MODEL=1 python3 -m src.recon.agent
+```
+
+Run it from the repository root — `python3 -m src.recon.agent` resolves
+`src/` relative to the working directory.

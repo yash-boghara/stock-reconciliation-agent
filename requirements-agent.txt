@@ -1,0 +1,5 @@
+# Only needed to run the agent's model path (RECON_USE_MODEL=1).
+# The generator, ingestion, rules, evaluation, the heuristic control, and the
+# entire test suite run on the standard library alone — which is what keeps
+# CI free and offline.
+anthropic>=0.69
