@@ -121,6 +121,7 @@ class CaseRecord:
     control_no_notes_cause: str | None     # notes ablated away
     control_no_history_cause: str | None    # SKU history ablated away
     control_bare_cause: str | None          # profile only
+    control_confidence: str | None
     has_note: bool
     keyword_readable: bool
     informative_note: bool  # a note that actually says something about the cause
@@ -165,6 +166,8 @@ def run_seed(seed: int) -> tuple[list[CaseRecord], dict]:
                 control_no_history_cause=(without_history[case.case_id].cause.value
                                           if in_residue else None),
                 control_bare_cause=(bare[case.case_id].cause.value
+                                    if in_residue else None),
+                control_confidence=(with_notes[case.case_id].confidence
                                     if in_residue else None),
                 has_note=bool(notes),
                 keyword_readable=(in_residue
@@ -242,6 +245,24 @@ def residue_rates(records: list[CaseRecord]) -> dict[str, Rate]:
                   and r.control_cause == r.truth),
             n),
     }
+
+
+def calibration(records: list[CaseRecord]) -> dict[str, Rate]:
+    """Does a stated confidence predict being right?
+
+    A confidence label nobody has checked is decoration. If `high` is no
+    more accurate than `low`, then routing on it — or asking a reviewer to
+    trust it — is worse than having no label at all, because it looks like
+    information.
+    """
+    out = {}
+    for level in ("high", "medium", "low"):
+        bucket = [r for r in records
+                  if not r.rules_resolved and r.control_confidence == level]
+        if bucket:
+            out[level] = Rate(
+                sum(1 for r in bucket if r.control_cause == r.truth), len(bucket))
+    return out
 
 
 def end_to_end(records: list[CaseRecord]) -> Rate:
@@ -377,6 +398,21 @@ def render(train: list[CaseRecord], test: list[CaseRecord],
         _row("Control, structured features only", residue["control_structure_only"]),
         _row("Control + keyword-matched notes", residue["control_with_notes"]),
         _row("Ceiling if notes were read properly", residue["reader_ceiling"]),
+        "",
+        "### Is the confidence label worth anything",
+        "",
+        "The agent states a confidence on every verdict. If it does not "
+        "predict correctness it is decoration, and worse than nothing — it "
+        "looks like information.",
+        "",
+        "| Stated confidence | Actually correct | 95% interval | Count |",
+        "|---|---:|---:|---:|",
+        *(_row(f"`{level}`", rate)
+          for level, rate in calibration(everything).items()),
+        "",
+        "Cleanly monotone and well separated, so it is a usable signal. What "
+        "the correction layer does with it is a policy question with measured "
+        "consequences — see [agent-design.md](agent-design.md).",
         "",
         "### What each retrieval tool is worth",
         "",

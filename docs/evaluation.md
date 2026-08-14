@@ -36,6 +36,18 @@ The three at zero are the judgement causes; the rules layer is not supposed to r
 | Control + keyword-matched notes | 84.1% | 83.0% – 85.1% | 3,915 / 4,655 |
 | Ceiling if notes were read properly | 89.5% | 88.6% – 90.4% | 4,168 / 4,655 |
 
+### Is the confidence label worth anything
+
+The agent states a confidence on every verdict. If it does not predict correctness it is decoration, and worse than nothing — it looks like information.
+
+| Stated confidence | Actually correct | 95% interval | Count |
+|---|---:|---:|---:|
+| `high` | 99.5% | 99.1% – 99.7% | 2,217 / 2,228 |
+| `medium` | 84.9% | 82.9% – 86.6% | 1,227 / 1,446 |
+| `low` | 48.0% | 44.9% – 51.1% | 471 / 981 |
+
+Cleanly monotone and well separated, so it is a usable signal. What the correction layer does with it is a policy question with measured consequences — see [agent-design.md](agent-design.md).
+
 ### What each retrieval tool is worth
 
 The agent has three tools. Each was ablated through the control itself rather than a reimplementation, so this measures the tool and not a copy of it.

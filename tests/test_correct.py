@@ -119,6 +119,66 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(correction.owner, "loss prevention")
 
 
+class TestConfidencePolicy(unittest.TestCase):
+    """A measured lever, off by default, with its consequences attached."""
+
+    def test_high_confidence_judgement_stays_manual_by_default(self):
+        """99.5% is not 100%. The gap between the rules layer and a
+        high-confidence judgement is the gap between proved and usually
+        right, and unattended posting should be on the proved side."""
+        correction = build_correction(
+            make_case(discrepancy=-2), Cause.UNLOGGED_WASTAGE,
+            from_rules=False, confidence="high", basis="x")
+        self.assertIs(correction.route, Route.REVIEW)
+
+    def test_the_lever_moves_only_high_confidence_work(self):
+        import src.recon.correct as correct
+
+        original = correct.AUTO_POST_HIGH_CONFIDENCE
+        correct.AUTO_POST_HIGH_CONFIDENCE = True
+        try:
+            promoted = build_correction(
+                make_case(discrepancy=-2), Cause.UNLOGGED_WASTAGE,
+                from_rules=False, confidence="high", basis="x")
+            unchanged = build_correction(
+                make_case(discrepancy=-2), Cause.UNLOGGED_WASTAGE,
+                from_rules=False, confidence="low", basis="x")
+        finally:
+            correct.AUTO_POST_HIGH_CONFIDENCE = original
+
+        self.assertIs(promoted.route, Route.AUTO)
+        self.assertIs(unchanged.route, Route.REVIEW)
+
+    def test_the_lever_never_overrides_the_value_threshold(self):
+        """Certainty is not the only control. A large adjustment posted
+        unattended is how a control failure becomes an audit finding."""
+        import src.recon.correct as correct
+
+        original = correct.AUTO_POST_HIGH_CONFIDENCE
+        correct.AUTO_POST_HIGH_CONFIDENCE = True
+        try:
+            correction = build_correction(
+                make_case(sku_id="TOB-6004", discrepancy=-10),  # $520
+                Cause.UNLOGGED_WASTAGE,
+                from_rules=False, confidence="high", basis="x")
+        finally:
+            correct.AUTO_POST_HIGH_CONFIDENCE = original
+        self.assertIs(correction.route, Route.REVIEW)
+
+    def test_the_lever_never_promotes_shrinkage(self):
+        import src.recon.correct as correct
+
+        original = correct.AUTO_POST_HIGH_CONFIDENCE
+        correct.AUTO_POST_HIGH_CONFIDENCE = True
+        try:
+            correction = build_correction(
+                make_case(sku_id="SNK-1044", discrepancy=-1), Cause.SHRINKAGE,
+                from_rules=False, confidence="high", basis="x")
+        finally:
+            correct.AUTO_POST_HIGH_CONFIDENCE = original
+        self.assertIs(correction.route, Route.ESCALATE)
+
+
 class TestQueue(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

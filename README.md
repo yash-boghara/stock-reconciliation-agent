@@ -129,6 +129,19 @@ different desks, one number.
 Certainty is not the only control: a large adjustment posted unattended is how
 a control failure becomes an audit finding, so value overrides confidence.
 
+Every correction, decision and amendment lands in a SQLite decision log
+(`data/decisions.db`, standard library). Auto-posted corrections are recorded
+as decisions too — they are adjustments made without a human, and a ledger
+that tracks only the reviewed half is not an audit trail. The log is also
+what makes reviewer agreement measurable, which is the accuracy signal that
+survives in a real store where there are no planted labels.
+
+The confidence label is calibrated — 99.5% / 84.9% / 48.0% correct across
+100 seeds — so it *could* route. Auto-posting high-confidence judgement calls
+would remove 40% of the review queue and post a wrong cause 0.76% of the
+time; it is off by default, because 99.5% is not the 100% that earned the
+rules layer its unattended posting.
+
 ## Data
 
 Synthetic, and deliberately messy — SKU spellings drift between systems,
@@ -176,12 +189,12 @@ python3 -m src.recon.ingest      # assembles cases, reports rejections
 python3 -m src.recon.rules       # classifies what the rules can
 python3 -m src.recon.evaluate    # scores rules against ground truth
 python3 -m src.recon.agent       # classifies the residue
-python3 -m src.recon.correct     # builds the review queue
+python3 -m src.recon.correct     # builds the review queue + decision log
 python3 -m src.recon.eval_report # 100-seed evaluation with intervals
 python3 -m unittest discover -s tests -t .
 ```
 
-Standard library only — 106 tests, no network, no key. The agent's model path
+Standard library only — 124 tests, no network, no key. The agent's model path
 is the one exception:
 
 ```bash
@@ -208,12 +221,12 @@ a no-model control; correction layer with confidence-and-value routing;
 100-seed evaluation harness with Wilson intervals, held-out ceiling
 estimation and McNemar paired testing; 106 tests including dataset
 integrity, generator invariants, per-rule declining cases, hand-checked
-statistics, a label-leakage guard, and a check that no document quotes a
-figure the code no longer produces; CI on 3.10 and 3.12, failing on any drift between the
+statistics, a label-leakage guard, an end-to-end CLI test, and a check that
+no document quotes a figure the code no longer produces; CI on 3.10 and 3.12, failing on any drift between the
 committed figures and the code.
 
-Next: persistence and an approval interface so decisions are recorded rather
-than printed; retrieval over resolved historical cases; supplier-level claim
+Next: an approval interface over the decision log; retrieval over resolved
+historical cases once real decisions accumulate; supplier-level claim
 aggregation.
 
 ## Licence

@@ -135,6 +135,22 @@ money to learn nothing. Backoff is exponential because the common transient
 failure is a rate limit, and retrying one immediately is how a client turns
 a single 429 into several.
 
+### Why confidence does not auto-post, even though it is calibrated
+
+The stated confidence predicts correctness cleanly — 99.5% / 84.9% / 48.0%
+across 100 seeds — so it is a usable signal rather than decoration. Routing
+on it is therefore tempting, and measurable: auto-posting high-confidence
+judgement calls under the value threshold would move **40% of the review
+queue** to unattended, at the cost of a wrong posting in **0.76%** of them,
+about one every seven runs.
+
+It is off by default anyway. The gap between the rules layer (100% over
+3,891 commitments) and a high-confidence judgement (99.5%) is the gap
+between *proved* and *usually right*, and a system that posts to a ledger
+without a human should sit on the proved side of it. `AUTO_POST_HIGH_CONFIDENCE`
+exists as a lever with those numbers attached, rather than as a decision
+buried in a routing function.
+
 ### Why `effort: medium`
 
 The residue task is a bounded four-way judgement over retrieved evidence,
@@ -172,8 +188,9 @@ control's answer.
   a five-point effect; the harness reports McNemar precisely so that a tie is
   read as "no evidence" rather than "no difference". Settling it needs a few
   hundred contested cases.
-- **Retrieval over resolved historical cases.** The natural next tool, but it
-  needs a decision log to retrieve from, which needs persistence first.
+- **Retrieval over resolved historical cases.** The decision log now exists
+  to retrieve from; the tool over it does not. It needs a corpus of real
+  reviewer decisions to be worth anything, which is a deployment away.
 - **Fine-tuning.** There is no training set worth the name, and the ceiling
   analysis says the remaining headroom is in reading free text — which a
   general model already does well.

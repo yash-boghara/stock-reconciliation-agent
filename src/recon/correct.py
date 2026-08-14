@@ -35,6 +35,20 @@ from .rules import Finding
 # unattended is how a control failure becomes an audit finding.
 REVIEW_THRESHOLD_NZD = 150.0
 
+# Whether a high-confidence judgement call may post without a human.
+#
+# Measured over 40 seeds: turning this on moves 790 of 1,989 reviewed
+# corrections to auto — 40% of the review queue — and posts a wrong cause in
+# 0.76% of them, about one every seven runs. That is a defensible trade for
+# small-value corrections and it is deliberately not the default, because the
+# gap between the rules layer (100% over 3,891 commitments) and a
+# high-confidence judgement (99.5%) is the gap between proved and usually
+# right. A system that posts unattended should be on the proved side of it.
+#
+# Left here as a lever with its consequences attached, rather than a decision
+# buried in a routing function.
+AUTO_POST_HIGH_CONFIDENCE = False
+
 
 class Action(str, Enum):
     """What actually has to happen, and therefore whose job it is."""
@@ -107,7 +121,8 @@ class Correction:
         return f"{verb}: {self.units:+d} units of {self.sku_id} ({self.description})"
 
 
-def _route(cause: Cause, value: float, from_rules: bool) -> Route:
+def _route(cause: Cause, value: float, from_rules: bool,
+           confidence: str = "") -> Route:
     """Decide who, if anyone, has to look at this.
 
     Shrinkage always reaches a person even when the evidence is strong: the
@@ -116,11 +131,13 @@ def _route(cause: Cause, value: float, from_rules: bool) -> Route:
     """
     if cause is Cause.SHRINKAGE:
         return Route.ESCALATE
-    if not from_rules:
-        return Route.REVIEW
     if value >= REVIEW_THRESHOLD_NZD:
         return Route.REVIEW
-    return Route.AUTO
+    if from_rules:
+        return Route.AUTO
+    if AUTO_POST_HIGH_CONFIDENCE and confidence == "high":
+        return Route.AUTO
+    return Route.REVIEW
 
 
 def build_correction(
@@ -148,7 +165,7 @@ def build_correction(
         owner=OWNER_FOR[action],
         units=case.discrepancy,
         value_nzd=value,
-        route=_route(cause, value, from_rules),
+        route=_route(cause, value, from_rules, confidence),
         confidence=confidence,
         basis=basis,
     )
@@ -269,7 +286,7 @@ if __name__ == "__main__":
     from pathlib import Path
 
     from .agent import classify_residue
-    from .generate import generate
+    from .generate import SEED, generate
     from .ingest import build_cases
     from .rules import classify
 
@@ -291,6 +308,25 @@ if __name__ == "__main__":
     print("\nby owner:")
     for owner, count in sorted(summary["by_owner"].items(), key=lambda kv: -kv[1]):
         print(f"  {owner:<20}{count:>3}")
+
+    # Persist the run so the corrections are auditable and the decisions a
+    # reviewer makes have somewhere to land. Printing a queue and forgetting
+    # it is what separates a classifier from a system.
+    from .decisions import agreement, open_log, pending, record_run
+
+    log_path = root / "data" / "decisions.db"
+    conn = open_log(log_path)
+    run_id = f"seed-{SEED}"
+    record_run(conn, run_id, queue, seed=SEED)
+    awaiting = pending(conn, run_id)
+    reviewed = agreement(conn)
+    print(f"\nlogged to {log_path.relative_to(root)} as run '{run_id}'")
+    print(f"  auto-posted   : {len(queue) - len(awaiting)}")
+    print(f"  awaiting review: {len(awaiting)}")
+    if reviewed["agreement_rate"] is not None:
+        print(f"  reviewer agreement: {reviewed['agreement_rate']:.0%} "
+              f"over {reviewed['reviewed']} decisions")
+    conn.close()
 
     out = root / "docs" / "sample-review-queue.md"
     out.parent.mkdir(exist_ok=True)
