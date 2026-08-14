@@ -67,15 +67,20 @@ what a person wrote about a SKU that week — `binned 5 butter, past date`, but
 also `had to pull 4 yoghurt — wouldn't keep till Monday` and `third week
 running we're down on paper`.
 
-| Classifier over the residue | Accuracy |
-|---|---|
-| Heuristic control, structure only | 75.0% |
-| **Control + keyword-matched notes** | **83.4%** |
-| **Ceiling if the informative notes were read** | **88.8%** |
+| Classifier over the residue | Accuracy | 95% interval |
+|---|---|---|
+| Heuristic control, structure only | 76.0% | 74.7 – 77.2 |
+| **Control + keyword-matched notes** | **84.1%** | 83.0 – 85.1 |
+| **Ceiling if the informative notes were read** | **89.5%** | 88.6 – 90.4 |
 
-A keyword list reads 57.8% of notes and never misreads one. The other **418 —
-23% of the whole residue — are phrased too obliquely for any word list**, and
-that is precisely the 5.4 points between the control and the ceiling.
+Measured over 100 seeds / 4,655 residue cases. The intervals on the last two
+rows do not overlap, so the gap is a real effect rather than a plausible one.
+
+A keyword list reads 57.6% of notes and never misreads one. Another **23% of
+the residue carries a note that says something about the cause but is phrased
+beyond any word list**, and that is precisely the 5.4 points between the
+control and the ceiling. A further 3% of notes are pure noise, which the
+ceiling correctly refuses to credit to anyone.
 
 Recognising that *wouldn't keep till Monday* means spoilage, and that *third
 week running* means recurrence, is what a language model does and a regex

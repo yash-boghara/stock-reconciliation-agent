@@ -32,9 +32,11 @@ jobs:
           python -m src.recon.generate
           python -m src.recon.evaluate
 
-      # Rebuild the committed sample queue and fail if it drifted. A sample
-      # output that no longer matches the code is worse than none at all.
-      - name: Check the committed review queue is current
+      # Rebuild the committed artifacts and fail if they drifted. A published
+      # figure that no longer matches the code is worse than none at all, and
+      # these are the numbers the README quotes.
+      - name: Check committed outputs are current
         run: |
           python -m src.recon.correct
-          git diff --exit-code docs/sample-review-queue.md
+          python -m src.recon.eval_report
+          git diff --exit-code docs/sample-review-queue.md docs/evaluation.md

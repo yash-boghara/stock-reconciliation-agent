@@ -293,14 +293,18 @@ class HeuristicClient:
     on every CI run without an API key or a cent of spend.
     """
 
-    def __init__(self, casefile: CaseFile) -> None:
+    def __init__(self, casefile: CaseFile, *, use_notes: bool = True) -> None:
         self.casefile = casefile
+        # Switched off to ablate the notes and measure what free text is
+        # worth on its own. Doing that by reimplementing the control in an
+        # analysis script would measure the reimplementation instead.
+        self.use_notes = use_notes
 
     def decide(self, case: ReconciliationCase) -> tuple[Cause, str, str]:
         profile = self.casefile.get_sku_profile(case.sku_id)
         history = self.casefile.get_sku_history(case.sku_id, case.case_id)
 
-        matched = self._match_notes(case)
+        matched = self._match_notes(case) if self.use_notes else None
         if matched is not None:
             cause, quote = matched
             return (cause, "high", f'Staff note: "{quote}"')
@@ -361,9 +365,10 @@ class HeuristicClient:
 
 
 def classify_with_heuristic(
-    case: ReconciliationCase, casefile: CaseFile
+    case: ReconciliationCase, casefile: CaseFile, *, use_notes: bool = True
 ) -> Verdict:
-    cause, confidence, rationale = HeuristicClient(casefile).decide(case)
+    cause, confidence, rationale = HeuristicClient(
+        casefile, use_notes=use_notes).decide(case)
     return Verdict(case.case_id, cause, confidence, rationale, tool_calls=2)
 
 
@@ -517,13 +522,14 @@ def classify_residue(
     client: Any | None = None,
     effort: str = "medium",
     cases: list | None = None,
+    use_notes: bool = True,
 ) -> dict[str, Verdict]:
     """Verdicts for every residue case. No client means the heuristic control."""
     casefile = CaseFile(result, findings)
     verdicts: dict[str, Verdict] = {}
     for case in (residue_cases(result, findings) if cases is None else cases):
         verdicts[case.case_id] = (
-            classify_with_heuristic(case, casefile)
+            classify_with_heuristic(case, casefile, use_notes=use_notes)
             if client is None
             else classify_with_model(case, casefile, client, effort=effort)
         )
@@ -588,6 +594,27 @@ if __name__ == "__main__":
     if client is not None:
         print(f"control       : {ctrl_correct}/{len(control)} "
               f"({ctrl_correct / len(control):.1%})")
+
+        # Equal totals are not a tie. Both classifiers saw the same cases, so
+        # only the ones they disagree on carry information — which is a paired
+        # question, and comparing totals answers a different one.
+        from .eval_report import Rate, mcnemar
+
+        model_only = sum(1 for cid, v in verdicts.items()
+                         if v.cause.value == labels[cid]
+                         and control[cid].cause.value != labels[cid])
+        control_only = sum(1 for cid, v in verdicts.items()
+                           if control[cid].cause.value == labels[cid]
+                           and v.cause.value != labels[cid])
+        p = mcnemar(model_only, control_only)
+        low, high = Rate(correct, len(verdicts)).interval
+        print(f"model 95% CI  : {low:.1%} – {high:.1%}")
+        print(f"disagreements : model-only {model_only}, control-only "
+              f"{control_only}  (McNemar p={p:.3f})")
+        if model_only + control_only == 0:
+            print("                identical on every case — nothing to test")
+        elif p > 0.05:
+            print("                not significant at this sample size")
         tokens = sum(v.input_tokens for v in verdicts.values())
         cached = sum(v.cached_tokens for v in verdicts.values())
         out = sum(v.output_tokens for v in verdicts.values())
