@@ -95,8 +95,12 @@ per-case token accounting.
 
 It ships with a **no-model heuristic control** that answers the same tool
 calls against the same evidence. That control is not a mock: it is the number
-the model has to beat, and it means CI exercises the whole harness on every
-push without an API key.
+the model has to beat, the vehicle for ablating each tool, and the reason CI
+exercises the whole harness on every push without an API key.
+
+Design decisions — why a manual loop over the SDK tool runner, why these
+three tools and not a fourth, why retries are selective, what it costs per
+case — are written up in **[docs/agent-design.md](docs/agent-design.md)**.
 
 | Classifier over the residue | Accuracy | 95% interval |
 |---|---|---|

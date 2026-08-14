@@ -36,6 +36,19 @@ The three at zero are the judgement causes; the rules layer is not supposed to r
 | Control + keyword-matched notes | 84.1% | 83.0% – 85.1% | 3,915 / 4,655 |
 | Ceiling if notes were read properly | 89.5% | 88.6% – 90.4% | 4,168 / 4,655 |
 
+### What each retrieval tool is worth
+
+The agent has three tools. Each was ablated through the control itself rather than a reimplementation, so this measures the tool and not a copy of it.
+
+| Evidence available | Accuracy | 95% interval | Count |
+|---|---:|---:|---:|
+| Nothing (majority class) | 41.4% | 40.0% – 42.8% | 1,928 / 4,655 |
+| + `get_sku_profile` | 73.1% | 71.8% – 74.4% | 3,404 / 4,655 |
+| + `get_sku_history` | 76.0% | 74.7% – 77.2% | 3,537 / 4,655 |
+| + `get_staff_notes` | 84.1% | 83.0% – 85.1% | 3,915 / 4,655 |
+
+Profile carries most of it (+31.7%), notes add +8.1%, and history adds +2.9% — small, but it is the only evidence that distinguishes a recurring loss from a one-off, which is the entire shrinkage signal. All three earn their place; none is there on faith.
+
 Of 4,655 residue cases, 2,662 carry a note. A keyword list reads 1,597 of them; 960 say something about the cause but are phrased beyond any word list, and 105 are pure noise that nobody could use.
 
 **The gap between the last two rows is the entire case for a language model here**, and it is bounded: it lives only in those oblique notes.

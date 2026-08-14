@@ -366,12 +366,15 @@ class HeuristicClient:
     on every CI run without an API key or a cent of spend.
     """
 
-    def __init__(self, casefile: CaseFile, *, use_notes: bool = True) -> None:
+    def __init__(self, casefile: CaseFile, *, use_notes: bool = True,
+                 use_history: bool = True) -> None:
         self.casefile = casefile
-        # Switched off to ablate the notes and measure what free text is
+        # Switched off to ablate an evidence source and measure what it is
         # worth on its own. Doing that by reimplementing the control in an
-        # analysis script would measure the reimplementation instead.
+        # analysis script would measure the reimplementation instead — which
+        # is how a tool ends up justified by an assertion.
         self.use_notes = use_notes
+        self.use_history = use_history
 
     def decide(self, case: ReconciliationCase) -> tuple[Cause, str, str]:
         profile = self.casefile.get_sku_profile(case.sku_id)
@@ -387,7 +390,8 @@ class HeuristicClient:
                     "Positive discrepancy; only a miscount overstates a close "
                     "once the structural causes are excluded.")
 
-        recurring = history["unexplained_negative_weeks"] >= 2
+        recurring = (self.use_history
+                     and history["unexplained_negative_weeks"] >= 2)
         if profile.get("theft_prone") and recurring:
             return (Cause.SHRINKAGE, "medium",
                     f"Theft-prone line with unexplained shortfalls in "
@@ -438,10 +442,11 @@ class HeuristicClient:
 
 
 def classify_with_heuristic(
-    case: ReconciliationCase, casefile: CaseFile, *, use_notes: bool = True
+    case: ReconciliationCase, casefile: CaseFile, *, use_notes: bool = True,
+    use_history: bool = True,
 ) -> Verdict:
     cause, confidence, rationale = HeuristicClient(
-        casefile, use_notes=use_notes).decide(case)
+        casefile, use_notes=use_notes, use_history=use_history).decide(case)
     return Verdict(case.case_id, cause, confidence, rationale, tool_calls=2)
 
 
@@ -635,13 +640,15 @@ def classify_residue(
     effort: str = "medium",
     cases: list | None = None,
     use_notes: bool = True,
+    use_history: bool = True,
 ) -> dict[str, Verdict]:
     """Verdicts for every residue case. No client means the heuristic control."""
     casefile = CaseFile(result, findings)
     verdicts: dict[str, Verdict] = {}
     for case in (residue_cases(result, findings) if cases is None else cases):
         verdicts[case.case_id] = (
-            classify_with_heuristic(case, casefile, use_notes=use_notes)
+            classify_with_heuristic(case, casefile, use_notes=use_notes,
+                                    use_history=use_history)
             if client is None
             else classify_with_model(case, casefile, client, effort=effort)
         )

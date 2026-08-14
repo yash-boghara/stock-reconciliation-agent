@@ -118,7 +118,9 @@ class CaseRecord:
     rules_resolved: bool
     rules_cause: str | None
     control_cause: str | None          # with notes
-    control_no_notes_cause: str | None  # notes ablated away
+    control_no_notes_cause: str | None     # notes ablated away
+    control_no_history_cause: str | None    # SKU history ablated away
+    control_bare_cause: str | None          # profile only
     has_note: bool
     keyword_readable: bool
     informative_note: bool  # a note that actually says something about the cause
@@ -136,6 +138,9 @@ def run_seed(seed: int) -> tuple[list[CaseRecord], dict]:
 
         with_notes = classify_residue(result, findings)
         without_notes = classify_residue(result, findings, use_notes=False)
+        without_history = classify_residue(result, findings, use_history=False)
+        bare = classify_residue(result, findings, use_notes=False,
+                                use_history=False)
         queue = build_queue(result, findings, with_notes)
 
         records = []
@@ -157,6 +162,10 @@ def run_seed(seed: int) -> tuple[list[CaseRecord], dict]:
                                if in_residue else None),
                 control_no_notes_cause=(without_notes[case.case_id].cause.value
                                         if in_residue else None),
+                control_no_history_cause=(without_history[case.case_id].cause.value
+                                          if in_residue else None),
+                control_bare_cause=(bare[case.case_id].cause.value
+                                    if in_residue else None),
                 has_note=bool(notes),
                 keyword_readable=(in_residue
                                   and control._match_notes(case) is not None),
@@ -216,6 +225,10 @@ def residue_rates(records: list[CaseRecord]) -> dict[str, Rate]:
 
     return {
         "majority": Rate(sum(1 for r in residue if r.truth == majority), n),
+        "profile_only": Rate(
+            sum(1 for r in residue if r.control_bare_cause == r.truth), n),
+        "no_history": Rate(
+            sum(1 for r in residue if r.control_no_history_cause == r.truth), n),
         "control_structure_only": Rate(
             sum(1 for r in residue if r.control_no_notes_cause == r.truth), n),
         "control_with_notes": Rate(
@@ -364,6 +377,29 @@ def render(train: list[CaseRecord], test: list[CaseRecord],
         _row("Control, structured features only", residue["control_structure_only"]),
         _row("Control + keyword-matched notes", residue["control_with_notes"]),
         _row("Ceiling if notes were read properly", residue["reader_ceiling"]),
+        "",
+        "### What each retrieval tool is worth",
+        "",
+        "The agent has three tools. Each was ablated through the control "
+        "itself rather than a reimplementation, so this measures the tool and "
+        "not a copy of it.",
+        "",
+        "| Evidence available | Accuracy | 95% interval | Count |",
+        "|---|---:|---:|---:|",
+        _row("Nothing (majority class)", residue["majority"]),
+        _row("+ `get_sku_profile`", residue["profile_only"]),
+        _row("+ `get_sku_history`", residue["control_structure_only"]),
+        _row("+ `get_staff_notes`", residue["control_with_notes"]),
+        "",
+        f"Profile carries most of it "
+        f"({residue['profile_only'].point - residue['majority'].point:+.1%}), "
+        f"notes add "
+        f"{residue['control_with_notes'].point - residue['control_structure_only'].point:+.1%}, "
+        f"and history adds "
+        f"{residue['control_structure_only'].point - residue['profile_only'].point:+.1%} "
+        "— small, but it is the only evidence that distinguishes a recurring "
+        "loss from a one-off, which is the entire shrinkage signal. All three "
+        "earn their place; none is there on faith.",
         "",
         f"Of {notes['residue']:,} residue cases, {notes['noted']:,} carry a note. "
         f"A keyword list reads {notes['keyword_readable']:,} of them; "
