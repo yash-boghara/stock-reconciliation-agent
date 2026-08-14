@@ -22,7 +22,10 @@ from src.recon.agent import (
     JUDGEMENT_CAUSES,
     _explain,
     CaseFile,
+    Verdict,
+    clean_rationale,
     contested_cases,
+    estimate_cost,
     HeuristicClient,
     build_brief,
     classify_residue,
@@ -267,6 +270,122 @@ class TestContestedSubset(unittest.TestCase):
         contested = contested_cases(self.result, self.findings)
         verdicts = classify_residue(self.result, self.findings, cases=contested)
         self.assertEqual(set(verdicts), {c.case_id for c in contested})
+
+
+class TestRobustness(unittest.TestCase):
+    """What happens when the API or the model misbehaves.
+
+    These are not hypotheticals: the contamination case below is text a real
+    run actually returned.
+    """
+
+    def setUp(self):
+        self.result, self.findings = pipeline(DATA)
+        self.casefile = CaseFile(self.result, self.findings)
+        self.case = residue_cases(self.result, self.findings)[0]
+
+    def test_stray_markup_is_stripped_and_reported(self):
+        """Observed in a real run. Truncate at the marker — everything after
+        it is the model losing the thread — and flag it, because silently
+        repairing bad output means nobody learns it is happening."""
+        dirty = ("Paper towels are bulky dry goods and the -2 is tiny."
+                 "</parameter>|<br>|<br>Note: I output the JSON above.<br>{")
+        cleaned, was_dirty = clean_rationale(dirty)
+        self.assertTrue(was_dirty)
+        self.assertEqual(cleaned,
+                         "Paper towels are bulky dry goods and the -2 is tiny.")
+
+    def test_clean_text_is_left_alone(self):
+        text = "Short-dated line with a note recording spoilage."
+        cleaned, was_dirty = clean_rationale(text)
+        self.assertFalse(was_dirty)
+        self.assertEqual(cleaned, text)
+
+    def test_contamination_survives_into_the_verdict_as_a_flag(self):
+        client = StubClient([text_response({
+            "cause": "miscount", "confidence": "low",
+            "rationale": "Tiny gap, clean history.</parameter><br>stray",
+        })])
+        verdict = classify_with_model(self.case, self.casefile, client)
+        self.assertTrue(verdict.rationale_was_cleaned)
+        self.assertNotIn("<br>", verdict.rationale)
+        self.assertIs(verdict.cause, Cause.MISCOUNT,
+                      "the enum-constrained field must be unaffected")
+
+    def test_malformed_json_fails_loudly(self):
+        """A verdict that cannot be parsed must not become a default."""
+        broken = StubResponse(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="{not json")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1,
+                                  cache_read_input_tokens=0))
+        with self.assertRaises(RuntimeError):
+            classify_with_model(self.case, self.casefile, StubClient([broken]))
+
+    def test_a_transient_failure_is_retried(self):
+        class RateLimitError(Exception):
+            pass
+
+        good = text_response({"cause": "miscount", "confidence": "low",
+                              "rationale": "ok"})
+
+        class Flaky(StubMessages):
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    raise RateLimitError("slow down")
+                return good
+
+        client = SimpleNamespace(messages=Flaky([]))
+        verdict = classify_with_model(self.case, self.casefile, client)
+        self.assertIs(verdict.cause, Cause.MISCOUNT)
+        self.assertEqual(verdict.attempts, 2)
+
+    def test_a_permanent_failure_is_not_retried(self):
+        """Retrying a rejected key or an empty balance spends time and, on a
+        paid path, money — it will fail identically every time."""
+        class BadRequestError(Exception):
+            pass
+
+        class Always(StubMessages):
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                raise BadRequestError("credit balance is too low")
+
+        client = SimpleNamespace(messages=Always([]))
+        with self.assertRaises(BadRequestError):
+            classify_with_model(self.case, self.casefile, client)
+        self.assertEqual(len(client.messages.calls), 1)
+
+    def test_every_request_carries_a_timeout(self):
+        client = StubClient([text_response(
+            {"cause": "miscount", "confidence": "low", "rationale": "ok"})])
+        classify_with_model(self.case, self.casefile, client)
+        self.assertIn("timeout", client.messages.calls[0])
+
+
+class TestCostModel(unittest.TestCase):
+    def test_cost_reflects_the_published_rates(self):
+        verdict = Verdict("c", Cause.MISCOUNT, "low", "x",
+                          input_tokens=1_000_000, output_tokens=0,
+                          cached_tokens=0)
+        self.assertAlmostEqual(verdict.cost_usd, 5.00, places=4)
+
+    def test_cached_reads_are_billed_at_a_tenth(self):
+        cached = Verdict("c", Cause.MISCOUNT, "low", "x",
+                         cached_tokens=1_000_000)
+        self.assertAlmostEqual(cached.cost_usd, 0.50, places=4)
+
+    def test_summary_reports_what_the_cache_saved(self):
+        verdicts = {
+            "a": Verdict("a", Cause.MISCOUNT, "low", "x",
+                         input_tokens=1_000, cached_tokens=9_000,
+                         output_tokens=300),
+        }
+        summary = estimate_cost(verdicts)
+        self.assertGreater(summary["usd"], 0)
+        self.assertAlmostEqual(summary["cache_read_share"], 0.9, places=3)
+        self.assertGreater(summary["usd_saved_by_cache"], 0)
 
 
 class TestFailureMessages(unittest.TestCase):

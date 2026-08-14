@@ -31,8 +31,8 @@ NZ$5,751.15, ordered by money at stake, each carrying the evidence behind it:
 ```
 
 **30 of the 75 post automatically and nobody opens them.** That is what the
-precision work was for: the rules layer has not named a wrong cause in 1585
-commitments across 40 seeds, which is what earns those corrections the right
+precision work was for: the rules layer has not named a wrong cause in 3,891
+commitments across 100 seeds, which is what earns those corrections the right
 to post unattended. The other 45 go to a person, worst money first.
 
 ## Design position

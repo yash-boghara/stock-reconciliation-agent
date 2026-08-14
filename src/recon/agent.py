@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -32,6 +33,36 @@ from .rules import Finding
 
 MODEL = "claude-opus-5"
 MAX_TOKENS = 8000
+REQUEST_TIMEOUT_SECONDS = 120.0
+MAX_ATTEMPTS = 3
+
+# Published Claude Opus 5 rates, USD per token. Cached input reads at roughly
+# a tenth of the input rate, which is the whole reason the shared system
+# prefix carries a cache breakpoint.
+PRICE_PER_TOKEN = {
+    "input": 5.00 / 1_000_000,
+    "cached": 0.50 / 1_000_000,
+    "output": 25.00 / 1_000_000,
+}
+
+# Failures worth trying again. Anything else — a bad request, a rejected key,
+# an exhausted balance — will fail identically on the second attempt, so
+# retrying it just spends time and, on a paid path, money.
+TRANSIENT_ERRORS = (
+    "RateLimitError",
+    "APIConnectionError",
+    "APITimeoutError",
+    "InternalServerError",
+    "APIStatusError",
+)
+
+# Markup the model should never emit inside a rationale. Observed in a real
+# run: a verdict came back with `</parameter>|<br>...` appended to otherwise
+# sound reasoning. The `cause` field was untouched because it is constrained
+# to an enum — which is the argument for constraining the field that drives
+# the decision and treating prose as advisory.
+STRAY_MARKERS = ("</parameter>", "<br>", "</antml", "<function_calls>",
+                 "</invoke>", "```")
 
 # The causes the rules layer cannot reach. The agent chooses among exactly
 # these — offering it the structural causes would invite it to second-guess
@@ -170,6 +201,48 @@ class Verdict:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    attempts: int = 1
+    rationale_was_cleaned: bool = False
+
+    @property
+    def cost_usd(self) -> float:
+        return (
+            self.input_tokens * PRICE_PER_TOKEN["input"]
+            + self.cached_tokens * PRICE_PER_TOKEN["cached"]
+            + self.output_tokens * PRICE_PER_TOKEN["output"]
+        )
+
+
+def clean_rationale(text: str) -> tuple[str, bool]:
+    """Strip stray markup, and say whether any was there.
+
+    Truncating at the first marker rather than deleting markers in place:
+    everything after one is the model losing the thread, not content worth
+    keeping. The flag matters as much as the cleaning — silently repairing
+    bad output means nobody ever learns it is happening.
+    """
+    cut = len(text)
+    for marker in STRAY_MARKERS:
+        found = text.find(marker)
+        if found != -1:
+            cut = min(cut, found)
+    return (text[:cut].strip(), cut != len(text))
+
+
+def estimate_cost(verdicts: dict[str, Verdict]) -> dict:
+    """What a run cost, and how much of that the cache saved."""
+    total = sum(v.cost_usd for v in verdicts.values())
+    cached = sum(v.cached_tokens for v in verdicts.values())
+    uncached = sum(v.input_tokens for v in verdicts.values())
+    without_cache = total + cached * (
+        PRICE_PER_TOKEN["input"] - PRICE_PER_TOKEN["cached"])
+    read = cached / (cached + uncached) if (cached + uncached) else 0.0
+    return {
+        "usd": round(total, 4),
+        "usd_per_case": round(total / len(verdicts), 4) if verdicts else 0.0,
+        "cache_read_share": round(read, 3),
+        "usd_saved_by_cache": round(without_cache - total, 4),
+    }
 
 
 # ----------------------------------------------------------------------
@@ -395,11 +468,15 @@ def classify_with_model(
     messages: list[dict] = [{"role": "user", "content": build_brief(case, casefile)}]
     tool_calls = 0
     usage = {"input": 0, "output": 0, "cached": 0}
+    attempt_log: list[int] = []
 
     for _ in range(max_turns):
-        response = client.messages.create(
+        response = _call(
+            client,
+            attempt_log,
             model=MODEL,
             max_tokens=MAX_TOKENS,
+            timeout=REQUEST_TIMEOUT_SECONDS,
             system=[{
                 "type": "text",
                 "text": SYSTEM_PROMPT,
@@ -425,7 +502,8 @@ def classify_with_model(
             raise RuntimeError(f"{case.case_id}: request declined by safety classifiers")
 
         if response.stop_reason != "tool_use":
-            return _read_verdict(case, response, tool_calls, usage)
+            return _read_verdict(case, response, tool_calls, usage,
+                                 max(attempt_log, default=1))
 
         messages.append({"role": "assistant", "content": response.content})
         results = []
@@ -444,24 +522,58 @@ def classify_with_model(
     raise RuntimeError(f"{case.case_id}: no verdict within {max_turns} turns")
 
 
-def _read_verdict(case, response, tool_calls: int, usage: dict) -> Verdict:
+def _read_verdict(case, response, tool_calls: int, usage: dict,
+                  attempts: int = 1) -> Verdict:
     text = next(
         (b.text for b in response.content if getattr(b, "type", None) == "text"),
         None,
     )
     if text is None:
         raise RuntimeError(f"{case.case_id}: response carried no verdict")
-    parsed = json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"{case.case_id}: verdict was not valid JSON ({exc})") from None
+
+    rationale, cleaned = clean_rationale(str(parsed.get("rationale", "")))
     return Verdict(
         case_id=case.case_id,
         cause=Cause(parsed["cause"]),
         confidence=parsed["confidence"],
-        rationale=parsed["rationale"],
+        rationale=rationale,
         tool_calls=tool_calls,
         input_tokens=usage["input"],
         output_tokens=usage["output"],
         cached_tokens=usage["cached"],
+        attempts=attempts,
+        rationale_was_cleaned=cleaned,
     )
+
+
+def _is_transient(exc: Exception) -> bool:
+    return type(exc).__name__ in TRANSIENT_ERRORS
+
+
+def _call(client: Any, attempt_log: list, **kwargs) -> Any:
+    """One API call, retried on failures that could plausibly succeed later.
+
+    Backoff is exponential because the common transient failure is a rate
+    limit, and retrying a rate limit immediately is how a client turns one
+    429 into several.
+    """
+    delay = 1.0
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.messages.create(**kwargs)
+            attempt_log.append(attempt)
+            return response
+        except Exception as exc:  # noqa: BLE001 — re-raised unless transient
+            if attempt == MAX_ATTEMPTS or not _is_transient(exc):
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")
 
 
 def _explain(exc: Exception, sdk: Any | None) -> str | None:
@@ -618,7 +730,18 @@ if __name__ == "__main__":
         tokens = sum(v.input_tokens for v in verdicts.values())
         cached = sum(v.cached_tokens for v in verdicts.values())
         out = sum(v.output_tokens for v in verdicts.values())
+        cost = estimate_cost(verdicts)
         print(f"tokens        : {tokens:,} in ({cached:,} cached), {out:,} out")
+        print(f"cost          : ${cost['usd']:.4f} "
+              f"(${cost['usd_per_case']:.4f}/case, "
+              f"{cost['cache_read_share']:.0%} of input served from cache, "
+              f"${cost['usd_saved_by_cache']:.4f} saved)")
+        retried = [v for v in verdicts.values() if v.attempts > 1]
+        cleaned = [v for v in verdicts.values() if v.rationale_was_cleaned]
+        if retried:
+            print(f"retried       : {len(retried)} case(s) hit a transient failure")
+        if cleaned:
+            print(f"cleaned       : {len(cleaned)} rationale(s) carried stray markup")
 
     # Every case, every time. A run that prints five rows makes the next
     # question cost another run.
@@ -639,6 +762,7 @@ if __name__ == "__main__":
         "correct": correct,
         "total": len(verdicts),
         "control_correct": ctrl_correct,
+        "cost": estimate_cost(verdicts) if client is not None else None,
         "cases": {
             cid: {
                 "truth": labels[cid],
@@ -647,6 +771,9 @@ if __name__ == "__main__":
                 "confidence": v.confidence,
                 "rationale": v.rationale,
                 "tool_calls": v.tool_calls,
+                "attempts": v.attempts,
+                "rationale_was_cleaned": v.rationale_was_cleaned,
+                "cost_usd": round(v.cost_usd, 5),
                 "input_tokens": v.input_tokens,
                 "cached_tokens": v.cached_tokens,
                 "output_tokens": v.output_tokens,
