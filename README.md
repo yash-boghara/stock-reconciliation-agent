@@ -181,8 +181,7 @@ python3 -m src.recon.eval_report # 100-seed evaluation with intervals
 python3 -m unittest discover -s tests -t .
 ```
 
-Plus `python3 -m src.recon.eval_report` for the full statistical report.
-Standard library only — 90 tests, no network, no key. The agent's model path
+Standard library only — 106 tests, no network, no key. The agent's model path
 is the one exception:
 
 ```bash
@@ -207,9 +206,10 @@ rules layer with pair rules spanning adjacent periods; evaluation harness
 reporting per-cause precision and recall; agent layer with retrieval tools and
 a no-model control; correction layer with confidence-and-value routing;
 100-seed evaluation harness with Wilson intervals, held-out ceiling
-estimation and McNemar paired testing; 90 tests including dataset integrity,
-generator invariants, per-rule declining cases, hand-checked statistics, and
-a label-leakage guard; CI on 3.10 and 3.12, failing on any drift between the
+estimation and McNemar paired testing; 106 tests including dataset
+integrity, generator invariants, per-rule declining cases, hand-checked
+statistics, a label-leakage guard, and a check that no document quotes a
+figure the code no longer produces; CI on 3.10 and 3.12, failing on any drift between the
 committed figures and the code.
 
 Next: persistence and an approval interface so decisions are recorded rather
