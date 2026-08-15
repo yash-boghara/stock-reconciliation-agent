@@ -22,6 +22,7 @@ matches it is not earning its cost.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -203,6 +204,7 @@ class Verdict:
     cached_tokens: int = 0
     attempts: int = 1
     rationale_was_cleaned: bool = False
+    seconds: float = 0.0
 
     @property
     def cost_usd(self) -> float:
@@ -227,6 +229,32 @@ def clean_rationale(text: str) -> tuple[str, bool]:
         if found != -1:
             cut = min(cut, found)
     return (text[:cut].strip(), cut != len(text))
+
+
+def latency(verdicts: dict[str, Verdict]) -> dict:
+    """Wall time per case, as percentiles rather than a mean.
+
+    A mean hides the tail, and the tail is what a reviewer waits on: a case
+    needing three tool round-trips takes several times one that needs none.
+    p95 is the number that decides whether this can run interactively or has
+    to be a batch job.
+    """
+    times = sorted(v.seconds for v in verdicts.values() if v.seconds > 0)
+    if not times:
+        return {}
+
+    def percentile(fraction: float) -> float:
+        # Nearest-rank: with tens of cases, interpolating between two
+        # measurements invents precision the sample does not have.
+        index = min(len(times) - 1, max(0, math.ceil(fraction * len(times)) - 1))
+        return round(times[index], 2)
+
+    return {
+        "p50_seconds": percentile(0.50),
+        "p95_seconds": percentile(0.95),
+        "max_seconds": round(times[-1], 2),
+        "total_seconds": round(sum(times), 1),
+    }
 
 
 def estimate_cost(verdicts: dict[str, Verdict]) -> dict:
@@ -470,6 +498,7 @@ def classify_with_model(
     has to accept the heuristic control as a stand-in. The loop is small
     enough that owning it costs less than bending the runner around those.
     """
+    started = time.monotonic()
     messages: list[dict] = [{"role": "user", "content": build_brief(case, casefile)}]
     tool_calls = 0
     usage = {"input": 0, "output": 0, "cached": 0}
@@ -508,7 +537,8 @@ def classify_with_model(
 
         if response.stop_reason != "tool_use":
             return _read_verdict(case, response, tool_calls, usage,
-                                 max(attempt_log, default=1))
+                                 max(attempt_log, default=1),
+                                 time.monotonic() - started)
 
         messages.append({"role": "assistant", "content": response.content})
         results = []
@@ -528,7 +558,7 @@ def classify_with_model(
 
 
 def _read_verdict(case, response, tool_calls: int, usage: dict,
-                  attempts: int = 1) -> Verdict:
+                  attempts: int = 1, seconds: float = 0.0) -> Verdict:
     text = next(
         (b.text for b in response.content if getattr(b, "type", None) == "text"),
         None,
@@ -553,6 +583,7 @@ def _read_verdict(case, response, tool_calls: int, usage: dict,
         cached_tokens=usage["cached"],
         attempts=attempts,
         rationale_was_cleaned=cleaned,
+        seconds=round(seconds, 3),
     )
 
 
@@ -738,11 +769,16 @@ if __name__ == "__main__":
         cached = sum(v.cached_tokens for v in verdicts.values())
         out = sum(v.output_tokens for v in verdicts.values())
         cost = estimate_cost(verdicts)
+        speed = latency(verdicts)
         print(f"tokens        : {tokens:,} in ({cached:,} cached), {out:,} out")
         print(f"cost          : ${cost['usd']:.4f} "
               f"(${cost['usd_per_case']:.4f}/case, "
               f"{cost['cache_read_share']:.0%} of input served from cache, "
               f"${cost['usd_saved_by_cache']:.4f} saved)")
+        if speed:
+            print(f"latency       : p50 {speed['p50_seconds']}s, "
+                  f"p95 {speed['p95_seconds']}s, max {speed['max_seconds']}s "
+                  f"({speed['total_seconds']}s total)")
         retried = [v for v in verdicts.values() if v.attempts > 1]
         cleaned = [v for v in verdicts.values() if v.rationale_was_cleaned]
         if retried:
@@ -770,6 +806,7 @@ if __name__ == "__main__":
         "total": len(verdicts),
         "control_correct": ctrl_correct,
         "cost": estimate_cost(verdicts) if client is not None else None,
+        "latency": latency(verdicts) if client is not None else None,
         "cases": {
             cid: {
                 "truth": labels[cid],
@@ -781,6 +818,7 @@ if __name__ == "__main__":
                 "attempts": v.attempts,
                 "rationale_was_cleaned": v.rationale_was_cleaned,
                 "cost_usd": round(v.cost_usd, 5),
+                "seconds": v.seconds,
                 "input_tokens": v.input_tokens,
                 "cached_tokens": v.cached_tokens,
                 "output_tokens": v.output_tokens,

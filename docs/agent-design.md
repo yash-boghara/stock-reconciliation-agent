@@ -161,7 +161,7 @@ be exactly the kind of unmeasured claim the rest of this project avoids.
 
 ---
 
-## What it costs
+## What it costs, and how long it takes
 
 Measured on a real contested-case run — 9 cases, 10,178 input tokens,
 29,002 served from cache, 2,694 output — at published Claude Opus 5 rates:
@@ -173,6 +173,11 @@ Measured on a real contested-case run — 9 cases, 10,178 input tokens,
 | Input served from cache | **74%** |
 
 The 100-seed evaluation costs nothing, because it runs the control.
+
+Latency is reported as percentiles rather than a mean, because the mean hides
+the tail and the tail is what a reviewer waits on — a case needing three tool
+round-trips takes several times one that needs none. p95 is the number that
+decides whether this runs interactively or has to be a batch job.
 
 The economics are the argument for the architecture. Rules resolve 77% of
 cases at no per-case cost, so the model is only ever asked about the 23% that

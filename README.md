@@ -142,6 +142,21 @@ would remove 40% of the review queue and post a wrong cause 0.76% of the
 time; it is off by default, because 99.5% is not the 100% that earned the
 rules layer its unattended posting.
 
+A reviewer works the queue from the command line:
+
+```bash
+python3 -m src.recon.review list
+python3 -m src.recon.review show CHL-4002-W03
+python3 -m src.recon.review approve CHL-4002-W03 --by "priya s"
+python3 -m src.recon.review amend  CHL-4002-W03 --cause miscount --by "priya s"
+python3 -m src.recon.review stats            # reviewer agreement, by confidence
+```
+
+Separate subcommands rather than one interactive prompt, because a reviewer
+working forty corrections gets interrupted, and a tool that loses its place
+is a tool they stop using. The queue is the state; every command is safe to
+repeat.
+
 ## Data
 
 Synthetic, and deliberately messy — SKU spellings drift between systems,
@@ -190,11 +205,12 @@ python3 -m src.recon.rules       # classifies what the rules can
 python3 -m src.recon.evaluate    # scores rules against ground truth
 python3 -m src.recon.agent       # classifies the residue
 python3 -m src.recon.correct     # builds the review queue + decision log
+python3 -m src.recon.review list # work the queue: list/show/approve/amend/reject
 python3 -m src.recon.eval_report # 100-seed evaluation with intervals
 python3 -m unittest discover -s tests -t .
 ```
 
-Standard library only — 124 tests, no network, no key. The agent's model path
+Standard library only — 136 tests, no network, no key. The agent's model path
 is the one exception:
 
 ```bash
@@ -225,9 +241,9 @@ statistics, a label-leakage guard, an end-to-end CLI test, and a check that
 no document quotes a figure the code no longer produces; CI on 3.10 and 3.12, failing on any drift between the
 committed figures and the code.
 
-Next: an approval interface over the decision log; retrieval over resolved
-historical cases once real decisions accumulate; supplier-level claim
-aggregation.
+Next: retrieval over resolved historical cases once real decisions
+accumulate; supplier-level claim aggregation; an `effort` sweep on the model
+path.
 
 ## Licence
 
