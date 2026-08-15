@@ -245,6 +245,11 @@ statistics, a label-leakage guard, an end-to-end CLI test, and a check that
 no document quotes a figure the code no longer produces; CI on 3.10 and 3.12, failing on any drift between the
 committed figures and the code.
 
+What it would take to run this against a real retailer — what holds up, what
+breaks, and in what order — is written up in
+**[docs/production-readiness.md](docs/production-readiness.md)**, with the
+limits measured rather than guessed.
+
 Next: retrieval over resolved historical cases once real decisions
 accumulate; supplier-level claim aggregation; an `effort` sweep on the model
 path.
