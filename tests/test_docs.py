@@ -64,6 +64,89 @@ class TestGeneratedReport(unittest.TestCase):
                     f"row publishes a rate with no interval:\n{line}")
 
 
+class TestWalkthroughIsStillTrue(unittest.TestCase):
+    """The walkthrough traces two named cases in detail.
+
+    It is the document a stranger reads first, and it quotes specific
+    arithmetic — so it is also the document most able to be quietly wrong
+    after a generator change. These assert the trace against real output.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from src.recon.agent import classify_residue
+        from src.recon.correct import build_queue
+        from src.recon.generate import generate
+        from src.recon.ingest import build_cases
+        from src.recon.rules import classify
+
+        raw = ROOT / "data" / "raw"
+        generate(raw)
+        cls.result = build_cases(raw)
+        findings = classify(cls.result)
+        cls.queue = {c.case_id: c for c in build_queue(
+            cls.result, findings, classify_residue(cls.result, findings))}
+        cls.text = (ROOT / "docs" / "walkthrough.md").read_text()
+
+    def case(self, case_id):
+        return next(c for c in self.result.cases if c.case_id == case_id)
+
+    def test_the_auto_posted_example_still_reconciles(self):
+        """87 + 4 - 88 = 3 against a counted 71, so +68 — and 68 is exactly
+        4 cases of 18 booked as 4 units."""
+        case = self.case("SNK-1001-W03")
+        self.assertEqual(
+            (case.opening_count, case.delivered_units,
+             case.sold_units, case.closing_count),
+            (87, 4, 88, 71))
+        self.assertEqual(case.discrepancy, 68)
+
+        correction = self.queue["SNK-1001-W03"]
+        self.assertEqual(correction.route.value, "auto")
+        self.assertAlmostEqual(correction.value_nzd, 122.40, places=2)
+        self.assertEqual(correction.owner, "goods-in")
+
+        # And the document has to say so. Asserting only that the code still
+        # produces these values leaves the prose free to claim anything.
+        for quoted in (f"= +{case.discrepancy}",
+                       f"NZ${correction.value_nzd:,.2f}",
+                       f"{case.opening_count} + {case.delivered_units} - "
+                       f"{case.sold_units}"):
+            self.assertIn(quoted, self.text,
+                          f"walkthrough no longer states {quoted!r}")
+
+    def test_the_contrast_example_still_needs_a_human(self):
+        """The whole point of the contrast: $2.10 is reviewed while $122.40
+        posts itself, because of provenance rather than value."""
+        correction = self.queue["BEV-0142-W03"]
+        self.assertEqual(correction.route.value, "review")
+        self.assertAlmostEqual(correction.value_nzd, 2.10, places=2)
+        self.assertNotEqual(correction.confidence, "rule")
+        self.assertIn(f"NZ${correction.value_nzd:,.2f}", self.text)
+
+    def test_the_funnel_numbers_are_current(self):
+        flagged = [c for c in self.result.cases if c.discrepancy != 0]
+        auto = [c for c in self.queue.values() if c.route.value == "auto"]
+        self.assertEqual(len(self.result.cases), 150)
+        self.assertEqual(len(flagged), 75)
+        self.assertEqual(len(auto), 30)
+        for figure in ("150 cases", "75 balanced", "75 discrepancies",
+                       "30 auto", "45 review"):
+            self.assertIn(figure, self.text, f"walkthrough lost: {figure}")
+
+    def test_quoted_raw_rows_are_really_in_the_data(self):
+        """The messy rows are quoted verbatim to show what arrives. If the
+        generator stops producing them the illustration is fiction."""
+        for filename, fragment in (
+            ("deliveries.csv", "D9209205"),
+            ("stock_counts.csv", "SNK-1001-W03"),
+        ):
+            raw = (ROOT / "data" / "raw" / filename).read_text()
+            row = next(line for line in raw.splitlines() if fragment in line)
+            self.assertIn(row, self.text,
+                          f"walkthrough quotes a {filename} row that no longer exists")
+
+
 class TestProseMatchesTheCode(unittest.TestCase):
     def test_no_document_quotes_a_superseded_figure(self):
         offences = []

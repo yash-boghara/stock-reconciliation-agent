@@ -14,6 +14,10 @@ discrepancy      = actual_closing - expected_closing
 A non-zero discrepancy always has a cause. Naming that cause correctly, and
 turning it into work someone can action, is what the system is measured on.
 
+**New here?** [docs/walkthrough.md](docs/walkthrough.md) follows one
+discrepancy from four messy CSV rows to a NZ$122.40 correction that posts
+itself — the whole system in five minutes.
+
 ## What it produces
 
 A [review queue](docs/sample-review-queue.md) — 75 corrections worth
@@ -210,7 +214,7 @@ python3 -m src.recon.eval_report # 100-seed evaluation with intervals
 python3 -m unittest discover -s tests -t .
 ```
 
-Standard library only — 136 tests, no network, no key. The agent's model path
+Standard library only — 140 tests, no network, no key. The agent's model path
 is the one exception:
 
 ```bash
