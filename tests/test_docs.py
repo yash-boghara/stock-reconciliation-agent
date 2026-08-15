@@ -171,6 +171,25 @@ class TestProseMatchesTheCode(unittest.TestCase):
                 f"README does not quote the measured {label} ({value}) — "
                 "re-run `python3 -m src.recon.eval_report` and update it")
 
+    def test_the_readme_states_the_real_test_count(self):
+        """It has drifted twice. A number a human has to remember to update
+        is a number that will be wrong."""
+        import re
+        import unittest as ut
+
+        readme = (ROOT / "README.md").read_text()
+        claimed = {int(n) for n in re.findall(r"(\d+) tests", readme)}
+        self.assertTrue(claimed, "README no longer states a test count")
+
+        # Count by discovery, not by running the suite — running it from
+        # inside itself recurses until something gives up.
+        suite = ut.TestLoader().discover(str(ROOT / "tests"),
+                                         top_level_dir=str(ROOT))
+        actual = suite.countTestCases()
+        self.assertEqual(
+            claimed, {actual},
+            f"README claims {sorted(claimed)} tests; discovery finds {actual}")
+
     def test_every_document_the_readme_links_to_exists(self):
         readme = (ROOT / "README.md").read_text()
         for target in re.findall(r"\]\((?!https?:)([^)#]+)\)", readme):
